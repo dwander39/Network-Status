@@ -1,0 +1,1020 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import {
+  Background,
+  Controls,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  useReactFlow,
+  type Edge,
+  type Node,
+  type NodeChange,
+  type XYPosition
+} from '@xyflow/react'
+import '@xyflow/react/dist/style.css'
+import type { Device, MapLayoutBundle, MapLayoutSavePayload, MapManualGroup, NetworkInfo } from '@shared/types'
+import { useConfirmAction } from '../confirm/ConfirmDialogContext'
+import {
+  logDeleteFlowPreDelete,
+  recoverKeyboardAfterDestructiveAction
+} from '../utils/postDeleteFocusRecovery'
+import { AutoGroupNode } from './map/AutoGroupNode'
+import { DeviceNode } from './map/DeviceNode'
+import { GatewayNode } from './map/GatewayNode'
+import { MAP_GATEWAY_NODE_ID } from './map/flowIds'
+import { ManualGroupNode } from './map/ManualGroupNode'
+import { buildAutoLayoutNodes, parseAutoGroupNodeId, type MapAutoGroupMode } from './map/mapAutoLayout'
+import {
+  clearSelection,
+  initialMapSelection,
+  nodeMatchesMapSelection,
+  reconcileSelectionForLayoutMode,
+  selectAutoGroup,
+  selectDevice,
+  selectManualGroup,
+  selectionStillValidForDevices,
+  selectionStillValidForManualGroups,
+  type MapSelection
+} from './map/mapSelection'
+import {
+  absoluteNodePosition,
+  applyDeviceGroupDropResolution,
+  patchDeviceLayout,
+  patchGatewayPosition,
+  patchManualGroupPosition,
+  sameDeviceLayout,
+  sameXY,
+  snapDeviceLayout,
+  type DeviceLayoutSnap
+} from './map/mapLayoutGeometry'
+import type { MapLayoutCommand } from './map/mapLayoutHistory'
+
+/** Subtle edge color: aligns with `.banner-current-profile` accent, not a new hue. */
+const MAP_EDGE_STYLE: CSSProperties = {
+  stroke: '#5e81ac',
+  strokeWidth: 1.5,
+  opacity: 0.85
+}
+
+const DEFAULT_NEW_GROUP_W = 380
+const DEFAULT_NEW_GROUP_H = 220
+
+const nodeTypes = {
+  device: DeviceNode,
+  gateway: GatewayNode,
+  manualGroup: ManualGroupNode,
+  autoGroup: AutoGroupNode
+}
+
+/** Manual = persisted SQLite layout; other values = ephemeral auto-group view only (see `mapAutoLayout.ts`). */
+export type MapLayoutMode = 'manual' | MapAutoGroupMode
+
+function defaultDevicePosition(index: number, total: number): XYPosition {
+  const cols = Math.max(3, Math.ceil(Math.sqrt(Math.max(total, 1))))
+  const col = index % cols
+  const row = Math.floor(index / cols)
+  return { x: 60 + col * 210, y: 340 + row * 132 }
+}
+
+/** Build IPC payload: absolute positions + membership; group bounds for SQLite `map_manual_groups`. */
+function collectPersistPayload(nodes: Node[], networkId: string): MapLayoutSavePayload {
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  const positions: MapLayoutSavePayload['positions'] = []
+  const manualGroupLayouts: NonNullable<MapLayoutSavePayload['manualGroupLayouts']> = []
+
+  for (const n of nodes) {
+    if (n.type === 'manualGroup') {
+      const d = n.data as { name: string; width: number; height: number }
+      manualGroupLayouts.push({
+        id: n.id,
+        name: d.name,
+        x: n.position.x,
+        y: n.position.y,
+        width: d.width,
+        height: d.height
+      })
+      continue
+    }
+    if (n.type === 'device' || n.id === MAP_GATEWAY_NODE_ID) {
+      const abs = absoluteNodePosition(n, byId)
+      const parent = n.parentId ? byId.get(n.parentId) : undefined
+      const manualGroupId = parent?.type === 'manualGroup' ? parent.id : null
+      positions.push({ nodeKey: n.id, x: abs.x, y: abs.y, manualGroupId })
+    }
+  }
+
+  return { networkId, positions, manualGroupLayouts }
+}
+
+/** Keeps React `savedBundle` aligned with the live graph after drags (before debounced DB write). */
+function mergeDeviceGatewayPositionsIntoBundle(bundle: MapLayoutBundle, nodes: Node[]): MapLayoutBundle {
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  const positions = { ...bundle.positions }
+  for (const n of nodes) {
+    if (n.type !== 'device' && n.id !== MAP_GATEWAY_NODE_ID) continue
+    const abs = absoluteNodePosition(n, byId)
+    const parent = n.parentId ? byId.get(n.parentId) : undefined
+    const manualGroupId = parent?.type === 'manualGroup' ? parent.id : null
+    positions[n.id] = { x: abs.x, y: abs.y, manualGroupId }
+  }
+  return { ...bundle, positions }
+}
+
+interface GroupHandlers {
+  commitRename: (id: string, name: string) => void
+  deleteGroup: (id: string) => void
+}
+
+function manualGroupFlowNodeFromRow(g: MapManualGroup, handlers: GroupHandlers): Node {
+  return {
+    id: g.id,
+    type: 'manualGroup',
+    position: { x: g.x, y: g.y },
+    zIndex: 0,
+    style: { width: g.width, height: g.height },
+    dragHandle: '.map-manual-group__drag-handle',
+    data: {
+      name: g.name,
+      width: g.width,
+      height: g.height,
+      onCommitRename: (nextName: string) => handlers.commitRename(g.id, nextName),
+      onDelete: () => handlers.deleteGroup(g.id)
+    },
+    draggable: true,
+    selectable: true
+  }
+}
+
+type DragStartSnap =
+  | { kind: 'device'; id: string; layout: DeviceLayoutSnap }
+  | { kind: 'manualGroup'; id: string; pos: XYPosition }
+  | { kind: 'gateway'; id: string; pos: XYPosition }
+
+/**
+ * Merges saved bundle + live `prev` so status refreshes do not reset layout (manual mode only).
+ * Manual groups render behind devices (`zIndex`); membership comes from persisted `manualGroupId` only.
+ * Auto-group modes use `buildAutoLayoutNodes` instead — never mix those nodes into this payload.
+ */
+function buildMapNodes(
+  prev: Node[],
+  devices: Device[],
+  bundle: MapLayoutBundle,
+  gatewayIp: string | null,
+  handlers: GroupHandlers
+): Node[] {
+  const prevById = new Map(prev.map((n) => [n.id, n]))
+  const prevPos = new Map(prev.map((n) => [n.id, n.position]))
+  const groupMap = new Map(bundle.manualGroups.map((g) => [g.id, g]))
+
+  const gwSaved = bundle.positions[MAP_GATEWAY_NODE_ID]
+  const gwPos =
+    prevPos.get(MAP_GATEWAY_NODE_ID) ??
+    (gwSaved ? { x: gwSaved.x, y: gwSaved.y } : { x: 400, y: 120 })
+
+  const gatewayNode: Node = {
+    id: MAP_GATEWAY_NODE_ID,
+    type: 'gateway',
+    position: gwPos,
+    zIndex: 1,
+    data: { gatewayIp },
+    draggable: true
+  }
+
+  const groupNodes: Node[] = bundle.manualGroups.map((g) => ({
+    id: g.id,
+    type: 'manualGroup',
+    position: prevById.get(g.id)?.position ?? { x: g.x, y: g.y },
+    zIndex: 0,
+    style: { width: g.width, height: g.height },
+    dragHandle: '.map-manual-group__drag-handle',
+    data: {
+      name: g.name,
+      width: g.width,
+      height: g.height,
+      onCommitRename: (nextName: string) => handlers.commitRename(g.id, nextName),
+      onDelete: () => handlers.deleteGroup(g.id)
+    },
+    draggable: true,
+    selectable: true
+  }))
+
+  const deviceNodes: Node[] = []
+  devices.forEach((d, idx) => {
+    const rec = bundle.positions[d.id]
+    const prevNode = prevById.get(d.id)
+    const recParent =
+      rec?.manualGroupId && groupMap.has(rec.manualGroupId) ? rec.manualGroupId : undefined
+    const prevManualParent =
+      prevNode?.type === 'device' && prevNode.parentId && groupMap.has(prevNode.parentId)
+        ? prevNode.parentId
+        : undefined
+
+    /**
+     * Membership:
+     * - Persisted `manualGroupId` in the bundle is authoritative for restore/hydration (fixes first paint
+     *   where `prev` was built before `getMapLayout` returned, or any transient ungrouped `prev`).
+     * - Live manual parent wins when it disagrees with a stale bundle (e.g. moved to another group
+     *   before debounced save + bundle refresh).
+     * - Optimistic drag-in: `prevManualParent` set while `recParent` still null.
+     */
+    let targetParent: string | undefined
+    if (recParent != null && prevManualParent != null && recParent !== prevManualParent) {
+      targetParent = prevManualParent
+    } else {
+      targetParent = recParent ?? prevManualParent
+    }
+
+    if (targetParent) {
+      const g = groupMap.get(targetParent)!
+      let pos: XYPosition
+      if (prevNode?.type === 'device' && prevNode.parentId === targetParent) {
+        pos = prevNode.position
+      } else {
+        const ax = rec?.x ?? defaultDevicePosition(idx, devices.length).x
+        const ay = rec?.y ?? defaultDevicePosition(idx, devices.length).y
+        pos = { x: ax - g.x, y: ay - g.y }
+      }
+      deviceNodes.push({
+        id: d.id,
+        type: 'device',
+        parentId: targetParent,
+        position: pos,
+        zIndex: 2,
+        data: { device: d },
+        draggable: true
+      })
+    } else {
+      let pos: XYPosition
+      if (prevNode?.type === 'device') {
+        pos = prevNode.position
+      } else if (rec) {
+        pos = { x: rec.x, y: rec.y }
+      } else {
+        pos = defaultDevicePosition(idx, devices.length)
+      }
+      deviceNodes.push({
+        id: d.id,
+        type: 'device',
+        position: pos,
+        zIndex: 2,
+        data: { device: d },
+        draggable: true
+      })
+    }
+  })
+
+  return [gatewayNode, ...groupNodes, ...deviceNodes]
+}
+
+function buildEdges(devices: Device[]): Edge[] {
+  return devices.map((d) => ({
+    id: `e-gw-${d.id}`,
+    source: MAP_GATEWAY_NODE_ID,
+    target: d.id,
+    style: { ...MAP_EDGE_STYLE },
+    animated: false
+  }))
+}
+
+interface MapCanvasProps {
+  devices: Device[]
+  networkInfo: NetworkInfo | null
+  networkId: string | null
+}
+
+function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Element {
+  const { confirmAction } = useConfirmAction()
+  const api = window.ssApi
+  const { getNodes, getIntersectingNodes, screenToFlowPosition, fitView } = useReactFlow()
+  const [nodes, setNodesState, onNodesChangeBase] = useNodesState<Node>([])
+  /** Selection is app-owned (`mapSelection`); ignore RF `select` changes to avoid split-brain + multi-drag. */
+  const onNodesChange = useCallback(
+    (changes: NodeChange<Node>[]) => {
+      const filtered = changes.filter((c) => c.type !== 'select')
+      if (filtered.length === 0) return
+      onNodesChangeBase(filtered)
+    },
+    [onNodesChangeBase]
+  )
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
+  const [savedBundle, setSavedBundle] = useState<MapLayoutBundle>({ manualGroups: [], positions: {} })
+  const [layoutMode, setLayoutMode] = useState<MapLayoutMode>('manual')
+  /** After auto modes, rebuild manual nodes from DB snapshot instead of merging auto positions. */
+  const prevLayoutModeRef = useRef<MapLayoutMode>('manual')
+  /** Debounced persist must read latest mode when the timer fires (avoid saving after switching to auto). */
+  const layoutModeRef = useRef<MapLayoutMode>(layoutMode)
+  layoutModeRef.current = layoutMode
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const didInitialFit = useRef(false)
+  const flowWrapRef = useRef<HTMLDivElement>(null)
+
+  /** Drop stray focus from RF nodes after Escape/pane click so focus rings don’t mimic selection. */
+  const blurNonInputFocusInMap = useCallback(() => {
+    const root = flowWrapRef.current
+    if (!root) return
+    requestAnimationFrame(() => {
+      const ae = document.activeElement
+      if (!(ae instanceof HTMLElement) || !root.contains(ae)) return
+      if (ae.closest('input, textarea, select, [contenteditable="true"]')) return
+      ae.blur()
+    })
+  }, [])
+
+  /** Phase 2C.1 — canonical selection; synced to React Flow `node.selected` for styling only. */
+  const [mapSelection, setMapSelection] = useState<MapSelection>(initialMapSelection)
+  /** Avoid re-validating manual-group selection when `savedBundle` is a new object with the same group ids. */
+  const prevManualGroupIdsSigRef = useRef<string>('')
+
+  /** Command stacks — manual layout only; cleared when network changes or layout reset. */
+  const undoStackRef = useRef<MapLayoutCommand[]>([])
+  const redoStackRef = useRef<MapLayoutCommand[]>([])
+  const [mapHistTick, setMapHistTick] = useState(0)
+  /** True when history may be recorded/applied (connected LAN + Manual layout). */
+  const canRecordHistoryRef = useRef(false)
+  /** Drag start snapshot — one entry per completed drag (see `onNodeDragStop`). */
+  const dragStartRef = useRef<DragStartSnap | null>(null)
+  const schedulePersistRef = useRef<() => void>(() => {})
+
+  useEffect(() => {
+    let cancelled = false
+    const nid = networkId?.trim() ?? ''
+    if (!nid) {
+      setSavedBundle({ manualGroups: [], positions: {} })
+      return
+    }
+    void api.getMapLayout(nid).then((bundle) => {
+      if (cancelled) return
+      setSavedBundle(bundle)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [api, networkId])
+
+  const persistNow = useCallback(async () => {
+    if (layoutMode !== 'manual') return
+    const nid = networkId?.trim()
+    if (!nid) return
+    const payload = collectPersistPayload(getNodes(), nid)
+    await api.saveMapLayout(payload)
+    try {
+      const b = await api.getMapLayout(nid)
+      setSavedBundle(b)
+    } catch {
+      /* keep prior bundle if refresh fails */
+    }
+  }, [api, getNodes, layoutMode, networkId, setSavedBundle])
+
+  /** Immediate full layout write + bundle refresh (undo restore delete / group re-create). */
+  const persistLayoutSnapshot = useCallback(
+    async (nds: Node[]) => {
+      const nid = networkId?.trim()
+      if (!nid || layoutModeRef.current !== 'manual') return
+      await api.saveMapLayout(collectPersistPayload(nds, nid))
+      const b = await api.getMapLayout(nid)
+      setSavedBundle(b)
+    },
+    [api, networkId]
+  )
+
+  const clearMapHistory = useCallback(() => {
+    undoStackRef.current = []
+    redoStackRef.current = []
+    setMapHistTick((t) => t + 1)
+  }, [])
+
+  const pushMapHistory = useCallback((cmd: MapLayoutCommand) => {
+    if (!canRecordHistoryRef.current) return
+    undoStackRef.current.push(cmd)
+    redoStackRef.current = []
+    setMapHistTick((t) => t + 1)
+  }, [])
+
+  const handleMapUndo = useCallback(async () => {
+    if (!canRecordHistoryRef.current) return
+    const cmd = undoStackRef.current.pop()
+    if (!cmd) return
+    await cmd.undo()
+    redoStackRef.current.push(cmd)
+    setMapHistTick((t) => t + 1)
+    schedulePersistRef.current()
+  }, [])
+
+  const handleMapRedo = useCallback(async () => {
+    if (!canRecordHistoryRef.current) return
+    const cmd = redoStackRef.current.pop()
+    if (!cmd) return
+    await cmd.redo()
+    undoStackRef.current.push(cmd)
+    setMapHistTick((t) => t + 1)
+    schedulePersistRef.current()
+  }, [])
+
+  const commitGroupRename = useCallback(
+    (id: string, name: string) => {
+      const nid = networkId?.trim()
+      if (!nid) return
+      const trimmed = name.trim()
+      if (!trimmed) return
+      const gn = getNodes().find((n) => n.id === id && n.type === 'manualGroup')
+      const oldName = String((gn?.data as { name?: string } | undefined)?.name ?? '').trim()
+      if (oldName === trimmed) return
+      void (async () => {
+        await api.renameMapManualGroup({ id, name: trimmed })
+        const b = await api.getMapLayout(nid)
+        setSavedBundle(b)
+        if (!canRecordHistoryRef.current) return
+        pushMapHistory({
+          type: 'renameManualGroup',
+          undo: async () => {
+            await api.renameMapManualGroup({ id, name: oldName || 'Group' })
+            const b2 = await api.getMapLayout(nid)
+            setSavedBundle(b2)
+          },
+          redo: async () => {
+            await api.renameMapManualGroup({ id, name: trimmed })
+            const b2 = await api.getMapLayout(nid)
+            setSavedBundle(b2)
+          }
+        })
+      })()
+    },
+    [api, getNodes, networkId, pushMapHistory]
+  )
+
+  const handleDeleteGroup = useCallback(
+    async (groupId: string) => {
+      const nid = networkId?.trim()
+      if (!nid) return
+      const ndsBefore = getNodes()
+      const groupNode = ndsBefore.find((n) => n.id === groupId && n.type === 'manualGroup')
+      if (!groupNode) return
+      const gd = groupNode.data as { name: string; width: number; height: number }
+      const byId = new Map(ndsBefore.map((n) => [n.id, n]))
+      const members: { deviceId: string; abs: XYPosition }[] = []
+      for (const n of ndsBefore) {
+        if (n.type === 'device' && n.parentId === groupId) {
+          members.push({ deviceId: n.id, abs: absoluteNodePosition(n, byId) })
+        }
+      }
+      const snapshot = {
+        name: gd.name,
+        x: groupNode.position.x,
+        y: groupNode.position.y,
+        width: gd.width,
+        height: gd.height,
+        members
+      }
+      const redoState = { restoredId: undefined as string | undefined }
+
+      const ok = await confirmAction({
+        title: 'Delete map group?',
+        message:
+          'Remove this group from the map. Devices on the map stay placed; they are only unassigned from the group.',
+        confirmLabel: 'Delete',
+        cancelLabel: 'Cancel',
+        destructive: true
+      })
+      if (!ok) return
+      await persistNow()
+      logDeleteFlowPreDelete('map:deleteManualGroup')
+      await api.deleteMapManualGroup(groupId)
+      const b = await api.getMapLayout(nid)
+      setSavedBundle(b)
+      recoverKeyboardAfterDestructiveAction('map:deleteManualGroup', {
+        clearGraphSelection: () => {
+          setMapSelection(clearSelection())
+          setNodesState((ns) => ns.map((n) => ({ ...n, selected: false })))
+          setEdges((es) => es.map((e) => ({ ...e, selected: false })))
+        }
+      })
+      if (canRecordHistoryRef.current) {
+        pushMapHistory({
+          type: 'deleteManualGroup',
+          undo: async () => {
+            const g = await api.createMapManualGroup({
+              networkId: nid,
+              name: snapshot.name,
+              x: snapshot.x,
+              y: snapshot.y,
+              width: snapshot.width,
+              height: snapshot.height
+            })
+            redoState.restoredId = g.id
+            let next = getNodes()
+            if (!next.some((n) => n.id === g.id)) {
+              next = [...next, manualGroupFlowNodeFromRow(g, groupHandlers.current)]
+            }
+            for (const m of snapshot.members) {
+              next = patchDeviceLayout(next, m.deviceId, {
+                manualGroupId: g.id,
+                abs: m.abs
+              })
+            }
+            setNodesState(next)
+            await persistLayoutSnapshot(next)
+          },
+          redo: async () => {
+            const rid = redoState.restoredId
+            if (!rid) return
+            await api.deleteMapManualGroup(rid)
+            const b2 = await api.getMapLayout(nid)
+            setSavedBundle(b2)
+          }
+        })
+      }
+    },
+    [
+      api,
+      confirmAction,
+      getNodes,
+      networkId,
+      persistLayoutSnapshot,
+      persistNow,
+      pushMapHistory,
+      setEdges,
+      setMapSelection,
+      setNodesState
+    ]
+  )
+
+  const groupHandlers = useRef<GroupHandlers>({
+    commitRename: commitGroupRename,
+    deleteGroup: handleDeleteGroup
+  })
+  groupHandlers.current = { commitRename: commitGroupRename, deleteGroup: handleDeleteGroup }
+
+  useEffect(() => {
+    const gw = networkInfo?.gateway ?? null
+    const prevMode = prevLayoutModeRef.current
+    if (layoutMode !== 'manual') {
+      setNodesState(buildAutoLayoutNodes(devices, layoutMode, gw))
+      setEdges(buildEdges(devices))
+      prevLayoutModeRef.current = layoutMode
+      return
+    }
+    const reseedFromSaved = prevMode !== 'manual'
+    setNodesState((prev) =>
+      buildMapNodes(reseedFromSaved ? [] : prev, devices, savedBundle, gw, groupHandlers.current)
+    )
+    setEdges(buildEdges(devices))
+    prevLayoutModeRef.current = layoutMode
+  }, [devices, layoutMode, savedBundle, networkInfo?.gateway, setEdges, setNodesState])
+
+  useEffect(() => {
+    if (layoutMode === 'manual') return
+    const id = requestAnimationFrame(() => {
+      void fitView({ padding: 0.14, duration: 220 })
+    })
+    return () => cancelAnimationFrame(id)
+  }, [devices.length, fitView, layoutMode])
+
+  useEffect(() => {
+    if (nodes.length === 0 || didInitialFit.current) return
+    didInitialFit.current = true
+    const id = requestAnimationFrame(() => {
+      fitView({ padding: 0.18, duration: 200 })
+    })
+    return () => cancelAnimationFrame(id)
+  }, [nodes.length, fitView])
+
+  const schedulePersist = useCallback(() => {
+    if (layoutMode !== 'manual') return
+    const nid = networkId?.trim()
+    if (!nid) return
+    if (persistTimer.current) clearTimeout(persistTimer.current)
+    persistTimer.current = setTimeout(() => {
+      persistTimer.current = null
+      if (layoutModeRef.current !== 'manual') return
+      const payload = collectPersistPayload(getNodes(), nid)
+      void (async () => {
+        try {
+          await api.saveMapLayout(payload)
+          const b = await api.getMapLayout(nid)
+          setSavedBundle(b)
+        } catch {
+          /* ignore */
+        }
+      })()
+    }, 400)
+  }, [api, getNodes, layoutMode, networkId, setSavedBundle])
+
+  schedulePersistRef.current = schedulePersist
+
+  useEffect(() => {
+    return () => {
+      if (persistTimer.current) clearTimeout(persistTimer.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    clearMapHistory()
+    setMapSelection(clearSelection())
+    prevManualGroupIdsSigRef.current = ''
+  }, [networkId, clearMapHistory])
+
+  useEffect(() => {
+    setMapSelection((s) => reconcileSelectionForLayoutMode(s, layoutMode))
+  }, [layoutMode])
+
+  useEffect(() => {
+    const ids = new Set(devices.map((d) => d.id))
+    setMapSelection((s) => (selectionStillValidForDevices(s, ids) ? s : clearSelection()))
+  }, [devices])
+
+  useEffect(() => {
+    const ids = new Set(savedBundle.manualGroups.map((g) => g.id))
+    const sig = [...ids].sort().join(',')
+    if (sig === prevManualGroupIdsSigRef.current) return
+    prevManualGroupIdsSigRef.current = sig
+    setMapSelection((s) => (selectionStillValidForManualGroups(s, ids) ? s : clearSelection()))
+  }, [savedBundle])
+
+  useLayoutEffect(() => {
+    setNodesState((nds) => {
+      let changed = false
+      const next = nds.map((n) => {
+        const sel = nodeMatchesMapSelection(n, mapSelection, layoutMode)
+        if (n.selected === sel) return n
+        changed = true
+        return { ...n, selected: sel }
+      })
+      return changed ? next : nds
+    })
+  }, [layoutMode, mapSelection, nodes, setNodesState])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (layoutModeRef.current !== 'manual' || !canRecordHistoryRef.current) return
+      const el = e.target
+      if (el instanceof HTMLElement && el.closest('input, textarea, select, [contenteditable="true"]')) {
+        return
+      }
+      const mod = e.ctrlKey || e.metaKey
+      if (!mod) return
+      if (e.key === 'z' || e.key === 'Z') {
+        if (e.shiftKey) {
+          e.preventDefault()
+          void handleMapRedo()
+        } else {
+          e.preventDefault()
+          void handleMapUndo()
+        }
+      } else if (e.key === 'y' || e.key === 'Y') {
+        e.preventDefault()
+        void handleMapRedo()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [handleMapRedo, handleMapUndo])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const el = e.target
+      if (el instanceof HTMLElement && el.closest('input, textarea, select, [contenteditable="true"]')) {
+        return
+      }
+      setMapSelection(clearSelection())
+      blurNonInputFocusInMap()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [blurNonInputFocusInMap])
+
+  /**
+   * Capture layout at drag start; `onNodeDragStop` compares to final layout and pushes one history entry.
+   * No entries during pointermove — only after drag completes (manual mode).
+   */
+  const onNodeDragStart = useCallback(
+    (_: unknown, node: Node) => {
+      if (layoutModeRef.current !== 'manual') {
+        dragStartRef.current = null
+        return
+      }
+      const byId = new Map(getNodes().map((n) => [n.id, n]))
+      const live = byId.get(node.id) ?? node
+      if (live.type === 'device') {
+        dragStartRef.current = { kind: 'device', id: live.id, layout: snapDeviceLayout(live, byId) }
+      } else if (live.type === 'manualGroup') {
+        dragStartRef.current = { kind: 'manualGroup', id: live.id, pos: { ...live.position } }
+      } else if (live.type === 'gateway' || live.id === MAP_GATEWAY_NODE_ID) {
+        dragStartRef.current = { kind: 'gateway', id: MAP_GATEWAY_NODE_ID, pos: { ...live.position } }
+      } else {
+        dragStartRef.current = null
+      }
+    },
+    [getNodes]
+  )
+
+  const onNodeDragStop = useCallback(
+    (_: unknown, node: Node) => {
+      const snap = dragStartRef.current
+      dragStartRef.current = null
+
+      if (layoutModeRef.current !== 'manual') {
+        return
+      }
+
+      const nds = getNodes()
+      const next =
+        node.type === 'device'
+          ? applyDeviceGroupDropResolution(nds, node.id, getIntersectingNodes)
+          : nds
+
+      setNodesState(next)
+      setSavedBundle((bundle) => mergeDeviceGatewayPositionsIntoBundle(bundle, next))
+
+      const finalNode = next.find((n) => n.id === node.id)
+      if (!snap || !finalNode || !canRecordHistoryRef.current) {
+        schedulePersist()
+        return
+      }
+
+      const byId = new Map(next.map((n) => [n.id, n]))
+
+      if (snap.kind === 'device' && snap.id === node.id && finalNode.type === 'device') {
+        const endLayout = snapDeviceLayout(finalNode, byId)
+        if (!sameDeviceLayout(snap.layout, endLayout)) {
+          const before = snap.layout
+          const after: DeviceLayoutSnap = {
+            manualGroupId: endLayout.manualGroupId,
+            abs: { ...endLayout.abs }
+          }
+          pushMapHistory({
+            type: 'moveDevice',
+            undo: () => {
+              setNodesState((n) => patchDeviceLayout(n, snap.id, before))
+            },
+            redo: () => {
+              setNodesState((n) => patchDeviceLayout(n, snap.id, after))
+            }
+          })
+        }
+      } else if (snap.kind === 'manualGroup' && snap.id === node.id && finalNode.type === 'manualGroup') {
+        const endPos = { ...finalNode.position }
+        if (!sameXY(snap.pos, endPos)) {
+          const start = { ...snap.pos }
+          pushMapHistory({
+            type: 'moveManualGroup',
+            undo: () => setNodesState((n) => patchManualGroupPosition(n, snap.id, start)),
+            redo: () => setNodesState((n) => patchManualGroupPosition(n, snap.id, endPos))
+          })
+        }
+      } else if (
+        snap.kind === 'gateway' &&
+        snap.id === MAP_GATEWAY_NODE_ID &&
+        finalNode.id === MAP_GATEWAY_NODE_ID
+      ) {
+        const endPos = { ...finalNode.position }
+        if (!sameXY(snap.pos, endPos)) {
+          const start = { ...snap.pos }
+          pushMapHistory({
+            type: 'moveGateway',
+            undo: () => setNodesState((n) => patchGatewayPosition(n, MAP_GATEWAY_NODE_ID, start)),
+            redo: () => setNodesState((n) => patchGatewayPosition(n, MAP_GATEWAY_NODE_ID, endPos))
+          })
+        }
+      }
+
+      schedulePersist()
+    },
+    [getIntersectingNodes, getNodes, pushMapHistory, schedulePersist, setNodesState, setSavedBundle]
+  )
+
+  const onNodeClick = useCallback((_e: React.MouseEvent, node: Node) => {
+    if (node.type === 'device') {
+      setMapSelection(selectDevice(node.id))
+    } else if (node.type === 'manualGroup') {
+      setMapSelection(selectManualGroup(node.id))
+    } else if (node.type === 'autoGroup') {
+      const p = parseAutoGroupNodeId(node.id)
+      if (p) setMapSelection(selectAutoGroup(p.groupKey, p.autoGroupBy))
+    } else if (node.type === 'gateway' || node.id === MAP_GATEWAY_NODE_ID) {
+      setMapSelection(clearSelection())
+    }
+  }, [])
+
+  const onPaneClick = useCallback(() => {
+    setMapSelection(clearSelection())
+    blurNonInputFocusInMap()
+  }, [blurNonInputFocusInMap])
+
+  const handleCenterView = useCallback(() => {
+    void fitView({ padding: 0.2, duration: 280 })
+  }, [fitView])
+
+  const handleResetLayout = useCallback(async () => {
+    if (layoutMode !== 'manual') return
+    const nid = networkId?.trim()
+    if (!nid) return
+    await api.resetMapLayout(nid)
+    clearMapHistory()
+    setMapSelection(clearSelection())
+    setSavedBundle({ manualGroups: [], positions: {} })
+    const gw = networkInfo?.gateway ?? null
+    setNodesState(buildMapNodes([], devices, { manualGroups: [], positions: {} }, gw, groupHandlers.current))
+    setEdges(buildEdges(devices))
+    window.setTimeout(() => fitView({ padding: 0.2, duration: 200 }), 60)
+  }, [
+    api,
+    clearMapHistory,
+    devices,
+    fitView,
+    layoutMode,
+    networkId,
+    networkInfo?.gateway,
+    setEdges,
+    setMapSelection,
+    setNodesState
+  ])
+
+  const handleNewGroup = useCallback(async () => {
+    if (layoutMode !== 'manual') return
+    const nid = networkId?.trim()
+    if (!nid) return
+    const el = flowWrapRef.current
+    const rect = el?.getBoundingClientRect()
+    const center =
+      rect != null
+        ? screenToFlowPosition({
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2
+          })
+        : { x: 400, y: 280 }
+    const g = await api.createMapManualGroup({
+      networkId: nid,
+      name: 'New group',
+      x: center.x - DEFAULT_NEW_GROUP_W / 2,
+      y: center.y - DEFAULT_NEW_GROUP_H / 2,
+      width: DEFAULT_NEW_GROUP_W,
+      height: DEFAULT_NEW_GROUP_H
+    })
+    setSavedBundle((b) => ({ ...b, manualGroups: [...b.manualGroups, g] }))
+    if (canRecordHistoryRef.current) {
+      const gid = g.id
+      const snap = {
+        name: g.name,
+        x: g.x,
+        y: g.y,
+        width: g.width,
+        height: g.height
+      }
+      pushMapHistory({
+        type: 'createManualGroup',
+        undo: async () => {
+          await api.deleteMapManualGroup(gid)
+          const b2 = await api.getMapLayout(nid)
+          setSavedBundle(b2)
+        },
+        redo: async () => {
+          await api.createMapManualGroup({
+            networkId: nid,
+            name: snap.name,
+            x: snap.x,
+            y: snap.y,
+            width: snap.width,
+            height: snap.height
+          })
+          const b2 = await api.getMapLayout(nid)
+          setSavedBundle(b2)
+        }
+      })
+    }
+  }, [api, layoutMode, networkId, pushMapHistory, screenToFlowPosition])
+
+  const canPersist = Boolean(networkId?.trim())
+  const manualChrome = layoutMode === 'manual'
+  canRecordHistoryRef.current = manualChrome && canPersist
+  void mapHistTick
+  const canMapUndo = manualChrome && undoStackRef.current.length > 0
+  const canMapRedo = manualChrome && redoStackRef.current.length > 0
+
+  return (
+    <div className="map-flow-wrap">
+      {!canPersist ? (
+        <p className="muted map-flow__hint">
+          Connect to a network to save map positions. You can still drag nodes locally.
+        </p>
+      ) : null}
+      <div className="map-flow-toolbar map-flow-toolbar--spaced">
+        <label className="map-flow-toolbar__mode">
+          <span className="map-flow-toolbar__mode-label">Layout</span>
+          <select
+            value={layoutMode}
+            onChange={(e) => setLayoutMode(e.target.value as MapLayoutMode)}
+            aria-label="Map layout mode"
+          >
+            <option value="manual">Manual layout</option>
+            <option value="vendor">Group by vendor</option>
+            <option value="deviceType">Group by device type</option>
+            <option value="subnet">Group by subnet</option>
+          </select>
+        </label>
+        <button type="button" className="secondary" onClick={handleCenterView}>
+          Center view
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => void handleMapUndo()}
+          disabled={!canMapUndo}
+          title={!manualChrome ? 'Undo is only available in Manual layout' : 'Undo (Ctrl+Z)'}
+        >
+          Undo
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => void handleMapRedo()}
+          disabled={!canMapRedo}
+          title={!manualChrome ? 'Redo is only available in Manual layout' : 'Redo (Ctrl+Shift+Z or Ctrl+Y)'}
+        >
+          Redo
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => void handleNewGroup()}
+          disabled={!canPersist || !manualChrome}
+          title={!manualChrome ? 'Switch to Manual layout to add groups' : undefined}
+        >
+          + New group
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => void handleResetLayout()}
+          disabled={!canPersist || !manualChrome}
+          title={!manualChrome ? 'Switch to Manual layout to reset saved positions' : undefined}
+        >
+          Reset layout
+        </button>
+      </div>
+      {!manualChrome ? (
+        <div className="map-flow-readonly-banner" role="status">
+          <span className="map-flow-readonly-banner__title">Auto grouped view</span>
+          <span className="map-flow-readonly-banner__meta muted">
+            Manual layout unchanged · read-only · switch to Manual layout to edit positions and groups
+          </span>
+        </div>
+      ) : null}
+      <div className={`map-flow${!manualChrome ? ' map-flow--auto-view' : ''}`} ref={flowWrapRef}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onNodeClick={onNodeClick}
+          onPaneClick={onPaneClick}
+          onNodeDragStart={onNodeDragStart}
+          onNodeDragStop={onNodeDragStop}
+          nodesDraggable={manualChrome}
+          elementsSelectable={false}
+          nodesFocusable={false}
+          multiSelectionKeyCode={null}
+          selectionKeyCode={null}
+          selectionOnDrag={false}
+          nodesConnectable={false}
+          edgesFocusable={false}
+          edgesReconnectable={false}
+          deleteKeyCode={null}
+          minZoom={0.35}
+          maxZoom={1.5}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background color="#2e3440" gap={20} size={1} />
+          <Controls className="map-flow__controls" showInteractive={false} />
+        </ReactFlow>
+      </div>
+    </div>
+  )
+}
+
+export interface MapViewProps {
+  devices: Device[]
+  networkInfo: NetworkInfo | null
+}
+
+/**
+ * Map View shell: React Flow in a theme-colored canvas. Manual layout + manual groups are SQLite-scoped
+ * by `networkId`. Phase 2B auto-grouping modes are computed in-memory only (`mapAutoLayout.ts`).
+ */
+export function MapView({ devices, networkInfo }: MapViewProps): JSX.Element {
+  const networkId = networkInfo?.networkId ?? null
+  const flowKey = networkId ?? 'no-network'
+
+  return (
+    <section className="section map-view-section">
+      <div className="section-header">
+        <h2>Map view</h2>
+      </div>
+      <ReactFlowProvider key={flowKey}>
+        <MapCanvas devices={devices} networkInfo={networkInfo} networkId={networkId} />
+      </ReactFlowProvider>
+    </section>
+  )
+}

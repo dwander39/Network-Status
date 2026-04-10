@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Electron / Vite build outputs
+out/
+dist/
+release/
+
+# TypeScript
+*.tsbuildinfo
+
+# Environment & secrets (never commit)
+.env
+.env.*
+!.env.example
+!.env*.example
+*.pem
+*.p12
+*.key
+
+# Logs & debug
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor & tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Cursor (local project AI/editor state)
+.cursor/
+
+# Optional local data / caches
+.cache/
+.turbo/
+*.local

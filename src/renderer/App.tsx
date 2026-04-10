@@ -1,0 +1,432 @@
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type {
+  AppSettings,
+  ArpEntry,
+  Device,
+  DeviceGroup,
+  NetworkInfo,
+  NetworkProfileListItem,
+  SaveDevicePayload
+} from '@shared/types'
+import { useConfirmAction } from './confirm/ConfirmDialogContext'
+import {
+  logDeleteFlowPreDelete,
+  recoverKeyboardAfterDestructiveAction
+} from './utils/postDeleteFocusRecovery'
+import { DeviceForm } from './components/DeviceForm'
+import { NetworkProfilePanel } from './components/NetworkProfilePanel'
+import { DeviceTable, type GroupByMode, type SortKey } from './components/DeviceTable'
+import { DiscoveredPanel } from './components/DiscoveredPanel'
+import { SettingsModal } from './components/SettingsModal'
+import { NewNetworkDetectedModal } from './components/NewNetworkDetectedModal'
+import { EventLogPanel } from './components/EventLogPanel'
+
+const MapView = lazy(async () => {
+  const m = await import('./components/MapView')
+  return { default: m.MapView }
+})
+
+type FilterMode = 'all' | 'online' | 'offline'
+type MainViewMode = 'list' | 'map'
+
+function sortDevices(
+  list: Device[],
+  key: SortKey,
+  dir: 'asc' | 'desc'
+): Device[] {
+  const mul = dir === 'asc' ? 1 : -1
+  const copy = [...list]
+  copy.sort((a, b) => {
+    if (key === 'name') return a.name.localeCompare(b.name) * mul
+    if (key === 'group') {
+      const ga = (a.groupName ?? '').toLowerCase()
+      const gb = (b.groupName ?? '').toLowerCase()
+      if (ga !== gb) return ga.localeCompare(gb) * mul
+      return a.name.localeCompare(b.name) * mul
+    }
+    if (key === 'status') {
+      const o = { online: 0, offline: 1, unknown: 2 }
+      return (o[a.lastStatus] - o[b.lastStatus]) * mul
+    }
+    const ta = a.lastChecked ? new Date(a.lastChecked).getTime() : 0
+    const tb = b.lastChecked ? new Date(b.lastChecked).getTime() : 0
+    return (ta - tb) * mul
+  })
+  return copy
+}
+
+export function App(): JSX.Element {
+  const { confirmAction } = useConfirmAction()
+  const api = window.ssApi
+  const [devices, setDevices] = useState<Device[]>([])
+  const [groups, setGroups] = useState<DeviceGroup[]>([])
+  const [discovered, setDiscovered] = useState<ArpEntry[]>([])
+  const [settings, setSettings] = useState<AppSettings | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [filter, setFilter] = useState<FilterMode>('all')
+  const [groupBy, setGroupBy] = useState<GroupByMode>('none')
+  const [sortKey, setSortKey] = useState<SortKey>('name')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [formDevice, setFormDevice] = useState<Device | null | 'new'>(null)
+  const [formPrefill, setFormPrefill] = useState<
+    Partial<Pick<SaveDevicePayload, 'name' | 'ip' | 'subnet' | 'gateway'>> | null
+  >(null)
+  /** Remount DeviceForm on each open so IPC re-renders don’t reset fields via effect deps. */
+  const [formModalKey, setFormModalKey] = useState(0)
+  const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null)
+  const [networkSwitchMessage, setNetworkSwitchMessage] = useState<string | null>(null)
+  const [profiles, setProfiles] = useState<NetworkProfileListItem[]>([])
+  /** Which saved network the user is currently viewing in the dropdown. */
+  const [viewingProfile, setViewingProfile] = useState<NetworkProfileListItem | null>(null)
+  const [newNetwork, setNewNetwork] = useState<import('@shared/types').NewNetworkDetectedPayload | null>(null)
+  const [mainView, setMainView] = useState<MainViewMode>('list')
+
+  const viewingHistoricalProfile = viewingProfile != null && viewingProfile.isActive === false
+  const savedIps = useMemo(() => new Set(devices.map((d) => d.ip)), [devices])
+  const viewingProfileRef = useRef<NetworkProfileListItem | null>(null)
+
+  const onProfilesUpdated = useCallback((list: NetworkProfileListItem[]) => {
+    setProfiles(list)
+  }, [])
+
+  const load = useCallback(async () => {
+    setLoadError(null)
+    const [d, arp, s, g, n, prof] = await Promise.all([
+      api.getDevices(),
+      api.getArp(),
+      api.getSettings(),
+      api.getDeviceGroups(),
+      api.getNetworkInfo(),
+      api.getNetworkProfiles()
+    ])
+    setDevices(d)
+    setGroups(g)
+    setDiscovered(arp.discovered)
+    setSettings(s)
+    setNetworkInfo(n)
+    setProfiles(prof)
+  }, [api])
+
+  useEffect(() => {
+    if (!window.ssApi) {
+      setLoadError(
+        'Preload did not expose window.ssApi. Run the app with npm run dev (or use a fresh npm run build output), not raw electron on stale files.'
+      )
+      return
+    }
+    void load().catch((err: unknown) => {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    })
+    const unsubD = api.onDevicesChanged((next) => {
+      const vp = viewingProfileRef.current
+      if (vp && vp.isActive === false) {
+        // When browsing a historical saved network, ignore live pushes and keep showing that profile's rows.
+        void api.getDevices(vp.networkId).then(setDevices)
+      } else {
+        setDevices(next)
+      }
+    })
+    const unsubA = api.onArpChanged((p) => {
+      setDiscovered(p.discovered)
+    })
+    const unsubS = api.onSettingsChanged(setSettings)
+    const unsubG = api.onDeviceGroupsChanged(setGroups)
+    const unsubShow = api.onShowSettings(() => setSettingsOpen(true))
+    const unsubNet = api.onNetworkChanged((info) => {
+      setNetworkInfo(info)
+      setNetworkSwitchMessage('Network changed. Refreshing devices…')
+      window.setTimeout(() => setNetworkSwitchMessage(null), 4000)
+    })
+    const unsubNetInfo = api.onNetworkInfoUpdated(setNetworkInfo)
+    const unsubProfiles = api.onNetworkProfilesChanged(setProfiles)
+    const unsubNewNet = api.onNewNetworkDetected((p) => setNewNetwork(p))
+    return () => {
+      unsubD()
+      unsubA()
+      unsubS()
+      unsubG()
+      unsubShow()
+      unsubNet()
+      unsubNetInfo()
+      unsubProfiles()
+      unsubNewNet()
+    }
+  }, [api, load])
+
+  useEffect(() => {
+    viewingProfileRef.current = viewingProfile
+  }, [viewingProfile])
+
+  // When the user changes the "Saved networks" dropdown, reload devices for that saved network.
+  useEffect(() => {
+    if (!window.ssApi) return
+    if (!viewingProfile) return
+    void api.getDevices(viewingProfile.networkId).then(setDevices)
+  }, [api, viewingProfile?.id, viewingProfile?.networkId])
+
+  const filtered = useMemo(() => {
+    // When browsing a non-active saved network, we are not actively monitoring that LAN.
+    // Show the device rows, but avoid implying they are currently reachable ("online").
+    const base = viewingHistoricalProfile
+      ? devices.map((d) => ({ ...d, lastStatus: 'unknown' as const, lastChecked: null }))
+      : devices
+    let list = base
+    if (filter === 'online') list = list.filter((x) => x.lastStatus === 'online')
+    if (filter === 'offline') list = list.filter((x) => x.lastStatus === 'offline')
+    return sortDevices(list, sortKey, sortDir)
+  }, [devices, viewingHistoricalProfile, filter, sortKey, sortDir])
+
+  if (loadError) {
+    return (
+      <div className="app">
+        <h1>Could not start</h1>
+        <p className="error">{loadError}</p>
+        <p className="muted">Open DevTools (F12) → Console for details. See TEST-TODO.md step 1.</p>
+      </div>
+    )
+  }
+
+  function toggleSort(k: SortKey): void {
+    if (sortKey === k) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    else {
+      setSortKey(k)
+      setSortDir('asc')
+    }
+  }
+
+  async function handleDelete(id: string): Promise<void> {
+    const ok = await confirmAction({
+      title: 'Delete device?',
+      message: 'This removes the device from the monitored list. This action cannot be undone.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      destructive: true
+    })
+    if (!ok) return
+    logDeleteFlowPreDelete('app:deleteDevice')
+    await api.deleteDevice(id)
+    recoverKeyboardAfterDestructiveAction('app:deleteDevice')
+  }
+
+  if (!settings) {
+    return <div className="app muted">Loading…</div>
+  }
+
+  return (
+    <div className={`app${mainView === 'map' ? ' app--map-view' : ''}`}>
+      <h1>Network devices</h1>
+
+      <nav className="settings-submenu view-mode-nav" aria-label="Main view">
+        <button
+          type="button"
+          className={
+            mainView === 'list' ? 'settings-submenu__tab settings-submenu__tab--active' : 'settings-submenu__tab'
+          }
+          aria-current={mainView === 'list' ? 'page' : undefined}
+          onClick={() => setMainView('list')}
+        >
+          List view
+        </button>
+        <button
+          type="button"
+          className={
+            mainView === 'map' ? 'settings-submenu__tab settings-submenu__tab--active' : 'settings-submenu__tab'
+          }
+          aria-current={mainView === 'map' ? 'page' : undefined}
+          onClick={() => setMainView('map')}
+        >
+          Map view
+        </button>
+      </nav>
+
+      {networkInfo ? (
+        <div
+          className={`banner banner-muted${networkInfo.profileName ? ' banner-current-profile' : ''}`}
+        >
+          <span className="network-profile-title">
+            {networkInfo.profileName ? (
+              <>
+                <strong>{networkInfo.profileName}</strong>
+                <span className="muted"> — current network</span>
+              </>
+            ) : (
+              <strong>Current network</strong>
+            )}
+          </span>
+          <div className="network-profile-banner-detail">
+            {networkInfo.cidr} — gateway {networkInfo.gateway}, this host {networkInfo.localIpv4}
+            {networkInfo.profileLastSeen ? (
+              <span className="muted"> — last seen {new Date(networkInfo.profileLastSeen).toLocaleString()}</span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      {networkSwitchMessage ? (
+        <div className="banner banner-warn">{networkSwitchMessage}</div>
+      ) : null}
+
+      <div className="toolbar">
+        <button
+          type="button"
+          onClick={() => {
+            setFormPrefill(null)
+            setFormModalKey((k) => k + 1)
+            setFormDevice('new')
+          }}
+        >
+          Add device
+        </button>
+        {mainView === 'list' ? (
+          <>
+            <label>
+              Filter
+              <select
+                value={filter}
+                onChange={(e) => setFilter(e.target.value as FilterMode)}
+              >
+                <option value="all">All</option>
+                <option value="online">Online only</option>
+                <option value="offline">Offline only</option>
+              </select>
+            </label>
+            <label>
+              Group by
+              <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupByMode)}>
+                <option value="none">None</option>
+                <option value="subnet">Subnet</option>
+                <option value="vendor">Vendor</option>
+                <option value="deviceType">Device type</option>
+              </select>
+            </label>
+          </>
+        ) : (
+          <label>
+            Filter
+            <select
+              value={filter}
+              onChange={(e) => setFilter(e.target.value as FilterMode)}
+            >
+              <option value="all">All</option>
+              <option value="online">Online only</option>
+              <option value="offline">Offline only</option>
+            </select>
+          </label>
+        )}
+      </div>
+
+      {settings.listenAdapterNames.length === 0 ? (
+        <div className="banner banner-warn">
+          Monitoring is paused because no network adapters are selected. Devices are shown as offline and
+          ARP discovery is disabled. Open `Settings` → `Open Settings…` to select adapters.
+        </div>
+      ) : null}
+
+      <NetworkProfilePanel
+        networkInfo={networkInfo}
+        profiles={profiles}
+        onProfilesUpdated={onProfilesUpdated}
+        onViewingProfileChange={setViewingProfile}
+      />
+
+      {mainView === 'list' ? (
+        <DeviceTable
+          devices={filtered}
+          groups={groups}
+          groupBy={groupBy}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={toggleSort}
+          onDelete={(id) => void handleDelete(id)}
+          onSetDeviceGroup={async (deviceId, groupId) => {
+            try {
+              await api.setDeviceGroup(deviceId, groupId)
+            } catch (e) {
+              alert(e instanceof Error ? e.message : 'Could not update group')
+            }
+          }}
+          onSaveDevice={async (payload) => {
+            await api.saveDevice(payload)
+          }}
+        />
+      ) : (
+        <Suspense fallback={<p className="muted">Loading map…</p>}>
+          <MapView devices={filtered} networkInfo={networkInfo} />
+        </Suspense>
+      )}
+
+      <DiscoveredPanel
+        entries={discovered}
+        savedIps={savedIps}
+        onRefresh={async () => {
+          setDiscovered([])
+          try {
+            const p = await api.refreshArp()
+            setDiscovered(p.discovered)
+          } catch {
+            const arp = await api.getArp()
+            setDiscovered(arp.discovered)
+          }
+        }}
+        onAddToList={(e) => {
+          const name = e.vendor?.trim()
+            ? `${e.vendor.trim()} (${e.ip})`
+            : `Device ${e.ip}`
+          setFormPrefill({ name, ip: e.ip, subnet: '', gateway: '' })
+          setFormModalKey((k) => k + 1)
+          setFormDevice('new')
+        }}
+        onDismiss={async (e) => {
+          await api.dismissDiscoveredIp(e.ip)
+        }}
+        onClearDismissed={async () => {
+          await api.clearDismissedDiscovered()
+        }}
+      />
+
+      <EventLogPanel activeNetworkId={networkInfo?.networkId ?? null} profiles={profiles} />
+
+      {formDevice !== null ? (
+        <DeviceForm
+          key={formModalKey}
+          device={formDevice === 'new' ? null : formDevice}
+          groups={groups}
+          prefill={formDevice === 'new' ? formPrefill : null}
+          onClose={() => {
+            setFormDevice(null)
+            setFormPrefill(null)
+          }}
+          onSave={async (payload) => {
+            await api.saveDevice(payload)
+          }}
+        />
+      ) : null}
+
+      {settingsOpen ? (
+        <SettingsModal settings={settings} groups={groups} onClose={() => setSettingsOpen(false)} />
+      ) : null}
+
+      {newNetwork ? (
+        <NewNetworkDetectedModal
+          payload={newNetwork}
+          onClose={() => setNewNetwork(null)}
+          onIgnore={async () => {
+            await api.ignoreNewNetwork(newNetwork.networkId)
+          }}
+          onSave={async (name) => {
+            await api.createNetworkProfile({
+              networkId: newNetwork.networkId,
+              name,
+              ssid: newNetwork.ssid,
+              gateway: newNetwork.gateway,
+              subnet: newNetwork.subnet
+            })
+            const [n, prof] = await Promise.all([api.getNetworkInfo(), api.getNetworkProfiles()])
+            setNetworkInfo(n)
+            setProfiles(prof)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}

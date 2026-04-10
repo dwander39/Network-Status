@@ -1,0 +1,142 @@
+/**
+ * Semantic design tokens — single source of truth for global visual changes.
+ *
+ * How to tune the app later:
+ * - Palette / contrast: edit --color-* only.
+ * - Density: edit --space-* scale.
+ * - Shape: edit --radius-*.
+ * - Elevation: edit --shadow-*.
+ * - Layering: edit --z-* (keep confirm above modal).
+ * - Motion: edit --duration-* / --ease-*.
+ *
+ * Do not reference raw hex in components when a semantic token exists; add a new token if needed.
+ */
+
+:root {
+  /* —— Colors (semantic) —— */
+  --color-bg: #121418;
+  --color-surface: #1a1d24;
+  --color-surface-raised: #1e222a;
+  --color-surface-sunken: #14171d;
+  --color-border: #2e3440;
+  --color-border-muted: #2a2f3a;
+  --color-border-strong: #3b4252;
+  --color-text: #e8eaed;
+  --color-text-muted: #8b93a1;
+  --color-text-label: #bdc1c8;
+  --color-text-subtle: #9ca3af;
+  --color-text-emphasis: #e5e7eb;
+  --color-text-on-primary: #ffffff;
+  --color-text-group: #cbd5e1;
+
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+  --color-primary-focus-ring: rgb(59 130 246 / 0.45);
+
+  --color-secondary-bg: #374151;
+  --color-secondary-hover: #4b5563;
+
+  --color-danger: #b91c1c;
+  --color-danger-hover: #991b1b;
+  --color-danger-bright: #ef4444;
+  --color-danger-bright-muted: rgb(239 68 68 / 0.1);
+
+  --color-success: #22c55e;
+  --color-success-glow: rgb(34 197 94 / 0.53);
+
+  --color-warning: #f59e0b;
+  --color-warning-border-soft: rgb(245 158 11 / 0.33);
+  --color-warning-bg-soft: rgb(245 158 11 / 0.08);
+  --color-warning-text: #fbbf24;
+
+  --color-info: #5e81ac;
+  --color-accent: #5e81ac;
+  --color-accent-border: rgb(94 129 172 / 0.53);
+  --color-accent-bg-soft: rgb(94 129 172 / 0.12);
+
+  --color-table-header-hover: #22262f;
+  --color-table-group-row: #151820;
+
+  --color-settings-tab-hover-bg: #252a33;
+  --color-settings-tab-active-bg: #2c3d5c;
+  --color-settings-tab-active-border: #3d5a8a;
+
+  --color-confirm-destructive-border: #7f1d1d;
+  --color-error: #f87171;
+
+  --color-backdrop: rgb(0 0 0 / 0.55);
+  --color-backdrop-strong: rgb(0 0 0 / 0.6);
+
+  --color-banner-muted-border: #3b4252;
+  --color-banner-muted-bg: rgb(46 52 64 / 0.13);
+  --color-banner-muted-text: #a8b0bd;
+
+  --color-manual-group-dash: #4c566a;
+  --color-manual-group-bg: rgb(46 52 64 / 0.35);
+  /* Selected manual group ring — keep in sync with accent for map focus */
+  --color-manual-group-selected-border: rgb(94 129 172 / 0.75);
+  --color-hover-faint: rgb(255 255 255 / 0.04);
+
+  /* Map device / gateway cards — hover weaker than selection chrome */
+  --map-device-hover-border: var(--color-border-strong);
+  --map-device-hover-surface: var(--color-surface-raised);
+
+  --color-status-unknown: #94a3b8;
+  --color-danger-glow: rgb(239 68 68 / 0.53);
+
+  /* —— Spacing scale —— */
+  --space-1: 0.25rem;
+  --space-2: 0.35rem;
+  --space-3: 0.5rem;
+  --space-4: 0.65rem;
+  --space-5: 0.75rem;
+  --space-6: 1rem;
+  --space-7: 1.25rem;
+  --space-8: 1.5rem;
+  --space-9: 1.75rem;
+  --space-10: 2rem;
+  --space-px-4: 4px;
+
+  /* —— Radius —— */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-full: 999px;
+
+  /* —— Typography —— */
+  --font-sans: 'Segoe UI', system-ui, sans-serif;
+  --font-size-xs: 0.72rem;
+  --font-size-caption: 0.8rem;
+  --font-size-sm: 0.78rem;
+  --font-size-body-sm: 0.82rem;
+  --font-size-md: 0.85rem;
+  --font-size-body: 0.88rem;
+  --font-size-ui: 0.9rem;
+  --font-size-subheading: 1rem;
+  --font-size-title-sm: 1.05rem;
+  --font-size-title: 1.1rem;
+  --font-size-heading: 1.35rem;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --line-height-tight: 1.3;
+  --line-height-snug: 1.35;
+  --line-height-body: 1.4;
+  --line-height-relaxed: 1.45;
+
+  /* —— Shadows / elevation —— */
+  --shadow-sm: 0 1px 3px rgb(0 0 0 / 0.28);
+  --shadow-md: 0 4px 14px rgb(0 0 0 / 0.38);
+  --shadow-status: 0 0 6px;
+  --shadow-node: 0 2px 8px rgb(0 0 0 / 0.35);
+
+  /* —— Z-index —— */
+  --z-modal: 50;
+  --z-confirm: 200;
+
+  /* —— Motion —— */
+  --duration-fast: 120ms;
+  --duration-normal: 180ms;
+  --ease-standard: ease;
+  --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+}

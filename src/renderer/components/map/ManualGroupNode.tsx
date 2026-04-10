@@ -1,0 +1,145 @@
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { Node, NodeProps } from '@xyflow/react'
+
+/**
+ * Visual container for Phase 2A manual grouping only (persisted).
+ * Phase 2B temporary grouping uses `AutoGroupNode` — do not merge behaviors here.
+ */
+export type ManualGroupFlowNode = Node<
+  {
+    name: string
+    width: number
+    height: number
+    onCommitRename: (name: string) => void
+    onDelete: () => void
+  },
+  'manualGroup'
+>
+
+function ManualGroupNodeInner({ data, selected }: NodeProps<ManualGroupFlowNode>): JSX.Element {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(data.name)
+  const inputRef = useRef<HTMLInputElement>(null)
+  /** Enter/Escape trigger programmatic blur; skip the blur handler once so we don’t double-save/cancel. */
+  const ignoreNextBlurRef = useRef(false)
+
+  useEffect(() => {
+    if (!editing) setDraft(data.name)
+  }, [data.name, editing])
+
+  useLayoutEffect(() => {
+    if (!editing) return
+    const el = inputRef.current
+    if (!el) return
+    el.focus()
+    try {
+      el.select()
+    } catch {
+      /* ignore */
+    }
+  }, [editing])
+
+  const cancelEdit = useCallback(() => {
+    setDraft(data.name)
+    setEditing(false)
+  }, [data.name])
+
+  const applyIfChanged = useCallback(() => {
+    const next = draft.trim()
+    if (!next) {
+      cancelEdit()
+      return
+    }
+    if (next === data.name.trim()) {
+      setEditing(false)
+      return
+    }
+    setEditing(false)
+    data.onCommitRename(next)
+  }, [cancelEdit, data, draft])
+
+  const onTitleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      /* Stop graph/canvas from seeing typing while the input is focused. */
+      e.stopPropagation()
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        ignoreNextBlurRef.current = true
+        applyIfChanged()
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        ignoreNextBlurRef.current = true
+        cancelEdit()
+      }
+    },
+    [applyIfChanged, cancelEdit]
+  )
+
+  return (
+    <div
+      className={`map-manual-group${selected ? ' map-manual-group--selected' : ''}`}
+      style={{ width: data.width, height: data.height }}
+    >
+      <div className="map-manual-group__chrome">
+        {/* Only this strip starts a drag — title clicks open inline edit without moving the group. */}
+        <div className="map-manual-group__drag-handle" title="Drag to move group" aria-hidden>
+          ⠿
+        </div>
+        <div className="map-manual-group__title-wrap">
+          {editing ? (
+            <input
+              ref={inputRef}
+              type="text"
+              className="map-manual-group__title-input nodrag nopan nokey"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={onTitleKeyDown}
+              onBlur={() => {
+                if (ignoreNextBlurRef.current) {
+                  ignoreNextBlurRef.current = false
+                  return
+                }
+                applyIfChanged()
+              }}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              aria-label="Group name"
+            />
+          ) : (
+            <button
+              type="button"
+              className="map-manual-group__title map-manual-group__title--editable"
+              title="Click to rename"
+              onClick={(e) => {
+                e.stopPropagation()
+                setEditing(true)
+                setDraft(data.name)
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              {data.name}
+            </button>
+          )}
+        </div>
+        <div className="map-manual-group__actions">
+          <button
+            type="button"
+            className="danger map-manual-group__btn"
+            onClick={(e) => {
+              e.stopPropagation()
+              data.onDelete()
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export const ManualGroupNode = memo(ManualGroupNodeInner)
