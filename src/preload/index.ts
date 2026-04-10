@@ -82,6 +82,10 @@ const api = {
     ipcRenderer.invoke(IPC.RENAME_MAP_MANUAL_GROUP, payload),
   deleteMapManualGroup: (id: string): Promise<void> =>
     ipcRenderer.invoke(IPC.DELETE_MAP_MANUAL_GROUP, id),
+  setMapManualGroupLock: (payload: import('@shared/types').SetMapManualGroupLockPayload): Promise<void> =>
+    ipcRenderer.invoke(IPC.SET_MAP_MANUAL_GROUP_LOCK, payload),
+  showMapNodeContextMenu: (payload: import('@shared/types').ShowMapNodeContextMenuPayload): Promise<void> =>
+    ipcRenderer.invoke(IPC.SHOW_MAP_NODE_CONTEXT_MENU, payload),
   focusBrowserWindowForKeyboard: (context?: string): Promise<void> =>
     ipcRenderer.invoke(IPC.FOCUS_BROWSER_WINDOW_FOR_KEYBOARD, context ?? ''),
   getEventLogs: (query?: import('@shared/types').GetEventLogsQuery): Promise<import('@shared/types').EventLog[]> =>
@@ -113,6 +117,18 @@ const api = {
     }
     ipcRenderer.on(IPC.ON_SETTINGS_CHANGED, handler)
     return () => ipcRenderer.removeListener(IPC.ON_SETTINGS_CHANGED, handler)
+  },
+  onMapManualGroupLockChanged: (
+    cb: (p: import('@shared/types').MapManualGroupLockChangedPayload) => void
+  ): (() => void) => {
+    const handler = (
+      _e: import('electron').IpcRendererEvent,
+      payload: import('@shared/types').MapManualGroupLockChangedPayload
+    ): void => {
+      cb(payload)
+    }
+    ipcRenderer.on(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, handler)
+    return () => ipcRenderer.removeListener(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, handler)
   },
   onDeviceGroupsChanged: (cb: (groups: DeviceGroup[]) => void): (() => void) => {
     const handler = (_e: import('electron').IpcRendererEvent, groups: DeviceGroup[]): void => {

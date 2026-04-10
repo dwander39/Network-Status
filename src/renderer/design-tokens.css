@@ -81,6 +81,10 @@
   --map-device-hover-border: var(--color-border-strong);
   --map-device-hover-surface: var(--color-surface-raised);
 
+  /* Marquee selection (manual layout) */
+  --map-marquee-fill: rgb(94 129 172 / 0.12);
+  --map-marquee-border: rgb(94 129 172 / 0.55);
+
   --color-status-unknown: #94a3b8;
   --color-danger-glow: rgb(239 68 68 / 0.53);
 

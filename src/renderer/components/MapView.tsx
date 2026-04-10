@@ -26,17 +26,29 @@ import { MAP_GATEWAY_NODE_ID } from './map/flowIds'
 import { ManualGroupNode } from './map/ManualGroupNode'
 import { buildAutoLayoutNodes, parseAutoGroupNodeId, type MapAutoGroupMode } from './map/mapAutoLayout'
 import {
+  applyMarqueeDeviceSelection,
   clearSelection,
   initialMapSelection,
+  mapSelectionDeviceCount,
+  mapSelectionManualGroupCount,
   nodeMatchesMapSelection,
   reconcileSelectionForLayoutMode,
   selectAutoGroup,
   selectDevice,
+  selectDevicesMulti,
+  selectMixedDevicesAndGroups,
   selectManualGroup,
   selectionStillValidForDevices,
   selectionStillValidForManualGroups,
   type MapSelection
 } from './map/mapSelection'
+import {
+  deviceIdsInFlowRect,
+  normalizeFlowRect,
+  pickManualGroupTargetInRect,
+  type MarqueeHitMode,
+  type FlowRect
+} from './map/mapMarquee'
 import {
   absoluteNodePosition,
   applyDeviceGroupDropResolution,
@@ -138,6 +150,7 @@ function manualGroupFlowNodeFromRow(g: MapManualGroup, handlers: GroupHandlers):
       name: g.name,
       width: g.width,
       height: g.height,
+      contentsLocked: g.contentsLocked,
       onCommitRename: (nextName: string) => handlers.commitRename(g.id, nextName),
       onDelete: () => handlers.deleteGroup(g.id)
     },
@@ -192,6 +205,7 @@ function buildMapNodes(
       name: g.name,
       width: g.width,
       height: g.height,
+      contentsLocked: g.contentsLocked,
       onCommitRename: (nextName: string) => handlers.commitRename(g.id, nextName),
       onDelete: () => handlers.deleteGroup(g.id)
     },
@@ -277,6 +291,39 @@ function buildEdges(devices: Device[]): Edge[] {
   }))
 }
 
+interface MapMarqueeOverlayProps {
+  flowRect: FlowRect
+  wrapEl: HTMLDivElement | null
+  flowToScreenPosition: (p: XYPosition) => XYPosition
+  /** Bumps when viewport changes so screen coords recompute while dragging. */
+  viewportRev: number
+}
+
+function MapMarqueeOverlay({
+  flowRect,
+  wrapEl,
+  flowToScreenPosition,
+  viewportRev
+}: MapMarqueeOverlayProps): JSX.Element | null {
+  void viewportRev
+  if (!wrapEl) return null
+  const wrap = wrapEl.getBoundingClientRect()
+  const c1 = flowToScreenPosition({ x: flowRect.x, y: flowRect.y })
+  const c2 = flowToScreenPosition({
+    x: flowRect.x + flowRect.width,
+    y: flowRect.y + flowRect.height
+  })
+  const left = Math.min(c1.x, c2.x) - wrap.left
+  const top = Math.min(c1.y, c2.y) - wrap.top
+  const width = Math.abs(c2.x - c1.x)
+  const height = Math.abs(c2.y - c1.y)
+  return (
+    <div className="map-flow__marquee-layer" aria-hidden>
+      <div className="map-flow__marquee-rect" style={{ left, top, width, height }} />
+    </div>
+  )
+}
+
 interface MapCanvasProps {
   devices: Device[]
   networkInfo: NetworkInfo | null
@@ -286,7 +333,8 @@ interface MapCanvasProps {
 function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Element {
   const { confirmAction } = useConfirmAction()
   const api = window.ssApi
-  const { getNodes, getIntersectingNodes, screenToFlowPosition, fitView } = useReactFlow()
+  const { getNodes, getIntersectingNodes, screenToFlowPosition, flowToScreenPosition, fitView } =
+    useReactFlow()
   const [nodes, setNodesState, onNodesChangeBase] = useNodesState<Node>([])
   /** Selection is app-owned (`mapSelection`); ignore RF `select` changes to avoid split-brain + multi-drag. */
   const onNodesChange = useCallback(
@@ -308,6 +356,20 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const didInitialFit = useRef(false)
   const flowWrapRef = useRef<HTMLDivElement>(null)
+  /** Phase 2C.2 — marquee in flow space; overlay maps via flowToScreenPosition. */
+  const [marqueeFlow, setMarqueeFlow] = useState<{
+    start: XYPosition
+    current: XYPosition
+  } | null>(null)
+  const marqueePointerIdRef = useRef<number | null>(null)
+  const marqueeDraftRef = useRef<{ start: XYPosition; current: XYPosition } | null>(null)
+  const marqueeStartClientRef = useRef<{ x: number; y: number } | null>(null)
+  const marqueeDidActivateRef = useRef(false)
+  const marqueeActiveRef = useRef(false)
+  const suppressNextPaneClickClearRef = useRef(false)
+  const [marqueeViewportTick, setMarqueeViewportTick] = useState(0)
+  const spacePressedRef = useRef(false)
+  const [spacePressed, setSpacePressed] = useState(false)
 
   /** Drop stray focus from RF nodes after Escape/pane click so focus rings don’t mimic selection. */
   const blurNonInputFocusInMap = useCallback(() => {
@@ -351,6 +413,15 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       cancelled = true
     }
   }, [api, networkId])
+
+  useEffect(() => {
+    return api.onMapManualGroupLockChanged((p) => {
+      setSavedBundle((b) => ({
+        ...b,
+        manualGroups: b.manualGroups.map((g) => (g.id === p.id ? { ...g, contentsLocked: p.locked } : g))
+      }))
+    })
+  }, [api])
 
   const persistNow = useCallback(async () => {
     if (layoutMode !== 'manual') return
@@ -620,7 +691,15 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
 
   useEffect(() => {
     const ids = new Set(devices.map((d) => d.id))
-    setMapSelection((s) => (selectionStillValidForDevices(s, ids) ? s : clearSelection()))
+    setMapSelection((s) => {
+      if (s.kind === 'multi') {
+        const next = s.deviceIds.filter((id) => ids.has(id))
+        if (next.length === 0) return clearSelection()
+        if (next.length === s.deviceIds.length) return s
+        return selectDevicesMulti(next)
+      }
+      return selectionStillValidForDevices(s, ids) ? s : clearSelection()
+    })
   }, [devices])
 
   useEffect(() => {
@@ -797,10 +876,169 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     }
   }, [])
 
+  const onNodeContextMenu = useCallback(
+    (e: React.MouseEvent, node: Node) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (layoutModeRef.current !== 'manual') return
+      if (node.type === 'manualGroup') {
+        const locked = Boolean((node.data as { contentsLocked?: boolean } | undefined)?.contentsLocked ?? true)
+        void api.showMapNodeContextMenu({
+          x: e.clientX,
+          y: e.clientY,
+          target: { kind: 'manualGroup', id: node.id, contentsLocked: locked }
+        })
+      } else if (node.type === 'device') {
+        // Reserve device right-click for future actions; keep minimal for now.
+        void api.showMapNodeContextMenu({ x: e.clientX, y: e.clientY, target: { kind: 'device', id: node.id } })
+      }
+    },
+    [api]
+  )
+
   const onPaneClick = useCallback(() => {
+    if (suppressNextPaneClickClearRef.current) {
+      suppressNextPaneClickClearRef.current = false
+      blurNonInputFocusInMap()
+      return
+    }
     setMapSelection(clearSelection())
     blurNonInputFocusInMap()
   }, [blurNonInputFocusInMap])
+
+  useEffect(() => {
+    marqueeActiveRef.current = marqueeFlow != null
+  }, [marqueeFlow])
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== ' ' && e.code !== 'Space') return
+      const el = e.target
+      if (el instanceof HTMLElement && el.closest('input, textarea, select, [contenteditable="true"]')) return
+      spacePressedRef.current = true
+      setSpacePressed(true)
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== ' ' && e.code !== 'Space') return
+      spacePressedRef.current = false
+      setSpacePressed(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onKeyUp as unknown as EventListener)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onKeyUp as unknown as EventListener)
+    }
+  }, [])
+
+  const onMarqueeViewportMove = useCallback(() => {
+    if (marqueeActiveRef.current) setMarqueeViewportTick((n) => n + 1)
+  }, [])
+
+  const onMapFlowPointerDownCapture = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (layoutModeRef.current !== 'manual' || e.button !== 0 || !e.isPrimary) return
+      if (spacePressedRef.current) return
+      const t = e.target
+      if (!(t instanceof HTMLElement)) return
+      if (t.closest('.react-flow__node')) return
+      if (t.closest('.react-flow__edge')) return
+      if (t.closest('input, textarea, select, [contenteditable="true"], button')) return
+      if (t.closest('.map-flow__controls')) return
+      if (!t.closest('.react-flow')) return
+      const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+      marqueeDraftRef.current = { start: pos, current: pos }
+      marqueePointerIdRef.current = e.pointerId
+      marqueeStartClientRef.current = { x: e.clientX, y: e.clientY }
+      marqueeDidActivateRef.current = false
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+    },
+    [screenToFlowPosition]
+  )
+
+  const onMapFlowPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (marqueePointerIdRef.current !== e.pointerId || !marqueeDraftRef.current) return
+      if (spacePressedRef.current) return
+      const startClient = marqueeStartClientRef.current
+      if (!startClient) return
+      const dx = e.clientX - startClient.x
+      const dy = e.clientY - startClient.y
+      const dist = Math.hypot(dx, dy)
+      const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+      const start = marqueeDraftRef.current.start
+      marqueeDraftRef.current = { start, current: pos }
+      if (!marqueeDidActivateRef.current) {
+        // Avoid swallowing simple clicks; only show marquee once the pointer meaningfully moves.
+        if (dist < 4) return
+        marqueeDidActivateRef.current = true
+      }
+      setMarqueeFlow({ start, current: pos })
+      e.preventDefault()
+    },
+    [screenToFlowPosition]
+  )
+
+  const onMapFlowPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (marqueePointerIdRef.current !== e.pointerId) return
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+      marqueePointerIdRef.current = null
+      const draft = marqueeDraftRef.current
+      marqueeDraftRef.current = null
+      marqueeStartClientRef.current = null
+      const didActivate = marqueeDidActivateRef.current
+      marqueeDidActivateRef.current = false
+      setMarqueeFlow(null)
+      if (!draft) return
+      if (!didActivate) {
+        // Treat as an empty-pane click (reliable clear) and ignore the ensuing RF onPaneClick.
+        suppressNextPaneClickClearRef.current = true
+        setMapSelection(clearSelection())
+        blurNonInputFocusInMap()
+        return
+      }
+      const rect = normalizeFlowRect(draft.start, draft.current)
+      if (rect.width < 2 && rect.height < 2) return
+      suppressNextPaneClickClearRef.current = true
+      const nds = getNodes()
+      const leftToRight = draft.current.x >= draft.start.x
+      const mode: MarqueeHitMode = leftToRight ? 'contain' : 'intersect'
+      const groupTarget = pickManualGroupTargetInRect(nds, rect, mode)
+      if (groupTarget) {
+        const gn = nds.find((n) => n.id === groupTarget.id && n.type === 'manualGroup')
+        const locked = Boolean((gn?.data as { contentsLocked?: boolean } | undefined)?.contentsLocked ?? true)
+        if (locked) {
+          setMapSelection(selectManualGroup(groupTarget.id))
+          return
+        }
+        // Unlocked group: only when fully enclosed (LTR) do we produce a mixed selection (group + contents).
+        if (mode === 'contain' && groupTarget.fullySelected) {
+          const members = nds.filter((n) => n.type === 'device' && n.parentId === groupTarget.id).map((n) => n.id)
+          setMapSelection(selectMixedDevicesAndGroups(members, [groupTarget.id]))
+          return
+        }
+        // Otherwise, select the group only (no mixed selection on touch).
+        setMapSelection(selectManualGroup(groupTarget.id))
+        return
+      }
+
+      const picked = deviceIdsInFlowRect(nds, rect, mode)
+      const additive = e.shiftKey
+      setMapSelection((cur) => applyMarqueeDeviceSelection(cur, picked, additive))
+    },
+    [blurNonInputFocusInMap, getNodes, setMapSelection]
+  )
 
   const handleCenterView = useCallback(() => {
     void fitView({ padding: 0.2, duration: 280 })
@@ -887,6 +1125,8 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
 
   const canPersist = Boolean(networkId?.trim())
   const manualChrome = layoutMode === 'manual'
+  const multiSelectDeviceCount = mapSelectionDeviceCount(mapSelection)
+  const multiSelectGroupCount = mapSelectionManualGroupCount(mapSelection)
   canRecordHistoryRef.current = manualChrome && canPersist
   void mapHistTick
   const canMapUndo = manualChrome && undoStackRef.current.length > 0
@@ -961,7 +1201,33 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
           </span>
         </div>
       ) : null}
-      <div className={`map-flow${!manualChrome ? ' map-flow--auto-view' : ''}`} ref={flowWrapRef}>
+      {manualChrome ? (
+        <p className="muted map-flow__hint map-flow__hint--marquee">
+          Manual: left-drag empty space = marquee · Shift+marquee adds · middle-drag or Space+left-drag = pan · right-click = menu
+        </p>
+      ) : (
+        <p className="muted map-flow__hint map-flow__hint--marquee">
+          Auto view: read-only · left-drag or middle-drag empty space = pan · no marquee
+        </p>
+      )}
+      <div
+        className={`map-flow${!manualChrome ? ' map-flow--auto-view' : ''}`}
+        ref={flowWrapRef}
+        onPointerDownCapture={onMapFlowPointerDownCapture}
+        onPointerMove={onMapFlowPointerMove}
+        onPointerUp={onMapFlowPointerUp}
+        onMouseDownCapture={(e) => {
+          // Suppress Windows/browser middle-click autoscroll UI so RF pan works.
+          if (e.button === 1) e.preventDefault()
+        }}
+        onAuxClick={(e) => {
+          if (e.button === 1) e.preventDefault()
+        }}
+        onContextMenu={(e) => {
+          // Canvas context menu deferred; for now reserve right-click and prevent pan/selection side-effects.
+          e.preventDefault()
+        }}
+      >
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -969,15 +1235,27 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeClick={onNodeClick}
+          onNodeContextMenu={onNodeContextMenu}
           onPaneClick={onPaneClick}
+          onPaneContextMenu={(e) => {
+            e.preventDefault()
+          }}
           onNodeDragStart={onNodeDragStart}
           onNodeDragStop={onNodeDragStop}
+          onMove={onMarqueeViewportMove}
           nodesDraggable={manualChrome}
           elementsSelectable={false}
           nodesFocusable={false}
           multiSelectionKeyCode={null}
           selectionKeyCode={null}
           selectionOnDrag={false}
+          panOnDrag={
+            manualChrome
+              ? spacePressed
+                ? [0, 1]
+                : [1]
+              : [0, 1]
+          }
           nodesConnectable={false}
           edgesFocusable={false}
           edgesReconnectable={false}
@@ -989,6 +1267,24 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
           <Background color="#2e3440" gap={20} size={1} />
           <Controls className="map-flow__controls" showInteractive={false} />
         </ReactFlow>
+        {manualChrome && (multiSelectDeviceCount > 1 || multiSelectGroupCount > 0) ? (
+          <div className="map-flow__status-overlay" role="status" aria-live="polite">
+            <span className="muted">
+              {multiSelectGroupCount > 0 ? `${multiSelectGroupCount} group${multiSelectGroupCount === 1 ? '' : 's'}` : ''}
+              {multiSelectGroupCount > 0 && multiSelectDeviceCount > 0 ? ' + ' : ''}
+              {multiSelectDeviceCount > 0 ? `${multiSelectDeviceCount} device${multiSelectDeviceCount === 1 ? '' : 's'}` : ''}
+              {' selected'}
+            </span>
+          </div>
+        ) : null}
+        {manualChrome && marqueeFlow ? (
+          <MapMarqueeOverlay
+            flowRect={normalizeFlowRect(marqueeFlow.start, marqueeFlow.current)}
+            wrapEl={flowWrapRef.current}
+            flowToScreenPosition={flowToScreenPosition}
+            viewportRev={marqueeViewportTick}
+          />
+        ) : null}
       </div>
     </div>
   )

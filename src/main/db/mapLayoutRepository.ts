@@ -22,6 +22,7 @@ function rowToGroup(row: Record<string, unknown>): MapManualGroup {
     y: Number(row.pos_y),
     width: Number(row.width),
     height: Number(row.height),
+    contentsLocked: Number((row as { contents_locked?: unknown }).contents_locked ?? 1) !== 0,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   }
@@ -31,7 +32,7 @@ function rowToGroup(row: Record<string, unknown>): MapManualGroup {
 export function listManualGroupsForNetwork(db: Database.Database, networkId: string): MapManualGroup[] {
   const rows = db
     .prepare(
-      `SELECT id, network_id, name, pos_x, pos_y, width, height, created_at, updated_at
+      `SELECT id, network_id, name, pos_x, pos_y, width, height, contents_locked, created_at, updated_at
        FROM map_manual_groups WHERE network_id = @nid ORDER BY name COLLATE NOCASE`
     )
     .all({ nid: networkId }) as Record<string, unknown>[]
@@ -41,7 +42,7 @@ export function listManualGroupsForNetwork(db: Database.Database, networkId: str
 export function getManualGroup(db: Database.Database, id: string): MapManualGroup | null {
   const row = db
     .prepare(
-      `SELECT id, network_id, name, pos_x, pos_y, width, height, created_at, updated_at
+      `SELECT id, network_id, name, pos_x, pos_y, width, height, contents_locked, created_at, updated_at
        FROM map_manual_groups WHERE id = ?`
     )
     .get(id) as Record<string, unknown> | undefined
@@ -55,8 +56,8 @@ export function createManualGroup(
   const id = uuidv4()
   const iso = new Date().toISOString()
   db.prepare(
-    `INSERT INTO map_manual_groups (id, network_id, name, pos_x, pos_y, width, height, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO map_manual_groups (id, network_id, name, pos_x, pos_y, width, height, contents_locked, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     payload.networkId,
@@ -65,10 +66,22 @@ export function createManualGroup(
     payload.y,
     payload.width,
     payload.height,
+    1,
     iso,
     iso
   )
   return getManualGroup(db, id)!
+}
+
+export function setManualGroupContentsLocked(
+  db: Database.Database,
+  payload: { id: string; locked: boolean }
+): boolean {
+  const iso = new Date().toISOString()
+  const r = db
+    .prepare(`UPDATE map_manual_groups SET contents_locked = ?, updated_at = ? WHERE id = ?`)
+    .run(payload.locked ? 1 : 0, iso, payload.id)
+  return r.changes > 0
 }
 
 export function renameManualGroup(db: Database.Database, payload: RenameMapManualGroupPayload): boolean {

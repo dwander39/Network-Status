@@ -10,6 +10,7 @@ export type ManualGroupFlowNode = Node<
     name: string
     width: number
     height: number
+    contentsLocked?: boolean
     onCommitRename: (name: string) => void
     onDelete: () => void
   },
@@ -86,6 +87,11 @@ function ManualGroupNodeInner({ data, selected }: NodeProps<ManualGroupFlowNode>
         <div className="map-manual-group__drag-handle" title="Drag to move group" aria-hidden>
           ⠿
         </div>
+        {data.contentsLocked ? (
+          <div className="map-manual-group__lock" title="Group contents locked" aria-hidden>
+            🔒
+          </div>
+        ) : null}
         <div className="map-manual-group__title-wrap">
           {editing ? (
             <input

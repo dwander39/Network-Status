@@ -49,6 +49,8 @@ import type {
   NewNetworkDetectedPayload,
   NetworkInfo,
   PurgeDeviceCachePayload,
+  SetMapManualGroupLockPayload,
+  ShowMapNodeContextMenuPayload,
   RenameMapManualGroupPayload,
   RenameNetworkProfilePayload,
   SaveAlertRulePayload,
@@ -62,6 +64,7 @@ import {
   deleteMapLayoutForNetwork,
   getMapLayoutBundle,
   renameManualGroup,
+  setManualGroupContentsLocked,
   upsertManualGroupLayouts,
   upsertMapLayoutPositions
 } from './db/mapLayoutRepository'
@@ -82,6 +85,17 @@ import {
 } from './db/networkProfileRepository'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// Fail fast with clear logging when a startup-time async error occurs (e.g. migration failure).
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] Unhandled promise rejection', reason)
+  try {
+    dialog.showErrorBox('System Status startup error', String(reason instanceof Error ? reason.message : reason))
+  } catch {
+    /* ignore */
+  }
+  app.exit(1)
+})
 
 let mainWindow: BrowserWindow | null = null
 let tray: ReturnType<typeof createTray> | null = null
@@ -578,6 +592,43 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.DELETE_MAP_MANUAL_GROUP, (_e, id: string) => {
     deleteManualGroup(getDatabase(), String(id))
+  })
+
+  ipcMain.handle(IPC.SET_MAP_MANUAL_GROUP_LOCK, (_e, payload: SetMapManualGroupLockPayload) => {
+    setManualGroupContentsLocked(getDatabase(), { id: String(payload.id), locked: Boolean(payload.locked) })
+    mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, {
+      id: String(payload.id),
+      locked: Boolean(payload.locked)
+    })
+  })
+
+  ipcMain.handle(IPC.SHOW_MAP_NODE_CONTEXT_MENU, (_e, payload: ShowMapNodeContextMenuPayload) => {
+    if (!mainWindow) return
+    const x = Math.round(payload.x)
+    const y = Math.round(payload.y)
+    if (payload.target.kind === 'manualGroup') {
+      const locked = Boolean(payload.target.contentsLocked)
+      // Build menu with explicit click handlers (no IPC recursion).
+      const menu = Menu.buildFromTemplate([
+        {
+          label: locked ? 'Unlock group' : 'Lock group',
+          click: () => {
+            const nextLocked = !locked
+            setManualGroupContentsLocked(getDatabase(), { id: payload.target.id, locked: nextLocked })
+            mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, {
+              id: payload.target.id,
+              locked: nextLocked
+            })
+          }
+        },
+        { type: 'separator' },
+        { label: locked ? 'Contents locked' : 'Contents unlocked', enabled: false }
+      ])
+      menu.popup({ window: mainWindow, x, y })
+      return
+    }
+    const menu = Menu.buildFromTemplate([{ label: 'Device actions (coming soon)', enabled: false }])
+    menu.popup({ window: mainWindow, x, y })
   })
 
   ipcMain.handle(IPC.RESET_MAP_LAYOUT, (_e, networkId: string) => {

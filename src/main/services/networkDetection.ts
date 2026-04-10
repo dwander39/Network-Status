@@ -1,5 +1,10 @@
 /**
- * Network fingerprinting: SSID (when available) + default gateway + subnet → stable `networkId`.
+ * Network fingerprinting: default gateway + subnet → stable `networkId`.
+ *
+ * Architectural rule:
+ * - `networkId` is the source of truth for scoping.
+ * - Wi‑Fi SSID is optional metadata only and MUST NOT affect identity.
+ *
  * OS-specific gateway discovery (Windows: ipconfig; macOS: route; Linux: ip route).
  * Debounced change detection to avoid flapping on brief Wi‑Fi drops or DHCP renewals.
  */
@@ -25,29 +30,31 @@ export interface NetworkContext {
   netmask: string
   /** e.g. 192.168.1.0/24 */
   cidr: string
-  /** Stable fingerprint: (ssid|)?gateway|networkCidr */
+  /** Stable fingerprint: gateway|networkCidr */
   networkId: string
 }
 
 /**
  * Normalize stored `networkId` strings so DB joins stay consistent.
  *
- * Format:
- * - With SSID: `ssid|gateway|cidr`
- * - Without SSID: `gateway|cidr`
+ * Canonical format:
+ * - `gateway|cidr`
+ *
+ * Back-compat normalization:
+ * - Legacy 3-part form: `ssid|gateway|cidr` is normalized to `gateway|cidr`
  *
  * Normalization rules:
  * - Trim, remove internal whitespace
- * - Lowercase SSID (only the first component when 3-part form is used)
  */
 export function normalizeNetworkId(raw: string): string {
   const cleaned = raw.trim().replace(/\s+/g, '')
   const parts = cleaned.split('|').filter(Boolean)
   if (parts.length >= 3) {
-    const [ssid, gw, ...rest] = parts
-    return [ssid.toLowerCase(), gw, rest.join('|')].join('|')
+    // Legacy `ssid|gateway|cidr` → canonical `gateway|cidr` (SSID is metadata only).
+    const [_ssid, gw, ...rest] = parts
+    return [gw, rest.join('|')].join('|')
   }
-  return cleaned
+  return parts.join('|')
 }
 
 /** Last confirmed network id (debounced). Updated only by the poller. */
@@ -270,11 +277,9 @@ async function getWifiSsidDarwin(): Promise<string | null> {
   return null
 }
 
-function buildNetworkId(input: { gateway: string; cidr: string; wifiSsid?: string | null }): string {
+function buildNetworkId(input: { gateway: string; cidr: string }): string {
   const gw = input.gateway.trim()
   const cidr = input.cidr.trim()
-  const ssid = (input.wifiSsid ?? '').trim()
-  if (ssid) return normalizeNetworkId(`${ssid.toLowerCase()}|${gw}|${cidr}`)
   return normalizeNetworkId(`${gw}|${cidr}`)
 }
 
@@ -306,9 +311,8 @@ function pickLocalForGateway(gateway: string): { address: string; netmask: strin
 
 /**
  * Computes current network fingerprint from OS state.
- * Uses SSID (when available) + default gateway + host IPv4 + netmask to build:
- * - `ssid|gateway|x.x.x.0/prefix` (preferred for Wi‑Fi)
- * - `gateway|x.x.x.0/prefix` (fallback)
+ * Uses default gateway + host IPv4 + netmask to build:
+ * - `gateway|x.x.x.0/prefix`
  */
 export async function computeNetworkContext(): Promise<NetworkContext | null> {
   const platform = process.platform
@@ -325,7 +329,7 @@ export async function computeNetworkContext(): Promise<NetworkContext | null> {
       localIpv4: w.ipv4,
       netmask: w.netmask,
       cidr: net.cidr,
-      networkId: buildNetworkId({ wifiSsid, gateway: w.gateway, cidr: net.cidr })
+      networkId: buildNetworkId({ gateway: w.gateway, cidr: net.cidr })
     }
   }
 
@@ -343,7 +347,7 @@ export async function computeNetworkContext(): Promise<NetworkContext | null> {
       localIpv4: local.address,
       netmask: local.netmask,
       cidr: net.cidr,
-      networkId: buildNetworkId({ wifiSsid, gateway: r.gateway, cidr: net.cidr })
+      networkId: buildNetworkId({ gateway: r.gateway, cidr: net.cidr })
     }
   }
 

@@ -65,9 +65,220 @@ export function getDatabase(): Database.Database {
   migrateMapManualGroupsSchema(db)
   migrateDeviceTypeCustomSchema(db)
   migrateEventLogsSchema(db)
+  migrateCanonicalizeNetworkIds(db)
   seedDefaultSettings(db)
   ensureSettingsKeys(db)
   return db
+}
+
+/**
+ * Phase 2C stabilization: SSID is metadata only; network identity is `gateway|cidr`.
+ * Older installs may have stored `ssid|gateway|cidr`. Canonicalize to prevent churn / duplicates.
+ */
+function migrateCanonicalizeNetworkIds(database: Database.Database): void {
+  try {
+    type NetworkProfileRow = {
+      id: string
+      network_id: string
+      name: string
+      ssid: string | null
+      gateway: string
+      subnet: string
+      first_seen: string
+      last_seen: string
+      settings_json: string | null
+    }
+
+    const isDefaultName = (name: string): boolean => /^network\s+\d+$/i.test(name.trim())
+    const scoreProfile = (p: NetworkProfileRow): number => {
+      let s = 0
+      if (p.name && !isDefaultName(p.name)) s += 3
+      if (p.settings_json && String(p.settings_json).trim()) s += 2
+      if (p.gateway && String(p.gateway).trim()) s += 1
+      if (p.subnet && String(p.subnet).trim()) s += 1
+      if (p.ssid && String(p.ssid).trim()) s += 0.5
+      return s
+    }
+
+    const tx = database.transaction(() => {
+      // 1) Merge/dedupe network_profiles first (unique constraint on network_id).
+      const profs = database
+        .prepare(
+          `SELECT id, network_id, name, ssid, gateway, subnet, first_seen, last_seen, settings_json
+           FROM network_profiles`
+        )
+        .all() as NetworkProfileRow[]
+
+      const byCanonical = new Map<string, NetworkProfileRow[]>()
+      for (const p of profs) {
+        const canon = normalizeNetworkId(String(p.network_id))
+        if (!canon) continue
+        const arr = byCanonical.get(canon) ?? []
+        arr.push(p)
+        byCanonical.set(canon, arr)
+      }
+
+      const deleteProfile = database.prepare(`DELETE FROM network_profiles WHERE id = ?`)
+      const updateProfile = database.prepare(
+        `UPDATE network_profiles
+         SET network_id = ?, name = ?, ssid = ?, gateway = ?, subnet = ?, first_seen = ?, last_seen = ?, settings_json = ?
+         WHERE id = ?`
+      )
+
+      for (const [canon, group] of byCanonical.entries()) {
+        if (group.length === 0) continue
+        const sorted = [...group].sort((a, b) => {
+          const sa = scoreProfile(a)
+          const sb = scoreProfile(b)
+          if (sa !== sb) return sb - sa
+          // Most recent last_seen wins on tie (ISO strings compare lexicographically).
+          return String(b.last_seen).localeCompare(String(a.last_seen))
+        })
+
+        const survivor = sorted[0]!
+        let name = survivor.name
+        let ssid = survivor.ssid != null && String(survivor.ssid).trim() ? String(survivor.ssid).trim() : null
+        let gateway = String(survivor.gateway ?? '')
+        let subnet = String(survivor.subnet ?? '')
+        let firstSeen = String(survivor.first_seen)
+        let lastSeen = String(survivor.last_seen)
+        let settingsJson =
+          survivor.settings_json != null && String(survivor.settings_json).trim()
+            ? String(survivor.settings_json)
+            : null
+
+        for (const dup of sorted.slice(1)) {
+          // Prefer a non-default, user-authored name.
+          if (isDefaultName(name) && dup.name && !isDefaultName(dup.name)) name = dup.name
+          // SSID is metadata: only fill when survivor is empty.
+          const dupSsid = dup.ssid != null && String(dup.ssid).trim() ? String(dup.ssid).trim() : null
+          if (!ssid && dupSsid) ssid = dupSsid
+          // Fill missing gateway/subnet metadata only.
+          if (!String(gateway).trim() && String(dup.gateway ?? '').trim()) gateway = String(dup.gateway)
+          if (!String(subnet).trim() && String(dup.subnet ?? '').trim()) subnet = String(dup.subnet)
+          // Settings: keep survivor unless empty.
+          const dupSettings =
+            dup.settings_json != null && String(dup.settings_json).trim() ? String(dup.settings_json) : null
+          if (!settingsJson && dupSettings) settingsJson = dupSettings
+          // Merge time bounds.
+          if (String(dup.first_seen) < firstSeen) firstSeen = String(dup.first_seen)
+          if (String(dup.last_seen) > lastSeen) lastSeen = String(dup.last_seen)
+        }
+
+        // Delete duplicates BEFORE updating survivor network_id (avoid UNIQUE constraint violations).
+        for (const dup of sorted.slice(1)) deleteProfile.run(dup.id)
+
+        // Update survivor to canonical network_id and merged metadata.
+        updateProfile.run(canon, name, ssid, gateway, subnet, firstSeen, lastSeen, settingsJson, survivor.id)
+      }
+
+      // 2) Merge map_layout_positions per canonical network_id (PK is (network_id,node_key)).
+      const posNids = database
+        .prepare(
+          `SELECT DISTINCT network_id AS nid
+           FROM map_layout_positions
+           WHERE network_id IS NOT NULL AND TRIM(network_id) != ''`
+        )
+        .all() as { nid: string }[]
+      const posByCanon = new Map<string, string[]>()
+      for (const r of posNids) {
+        const canon = normalizeNetworkId(String(r.nid))
+        if (!canon) continue
+        const arr = posByCanon.get(canon) ?? []
+        arr.push(String(r.nid))
+        posByCanon.set(canon, arr)
+      }
+
+      const readPositions = database.prepare(
+        `SELECT network_id, node_key, pos_x, pos_y, updated_at, manual_group_id
+         FROM map_layout_positions
+         WHERE network_id = ?`
+      )
+      const deletePositionsForNid = database.prepare(`DELETE FROM map_layout_positions WHERE network_id = ?`)
+      const insertPosition = database.prepare(
+        `INSERT INTO map_layout_positions (network_id, node_key, pos_x, pos_y, updated_at, manual_group_id)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+
+      for (const [canon, nids] of posByCanon.entries()) {
+        const uniqueNids = [...new Set(nids)]
+        if (uniqueNids.length === 1 && uniqueNids[0] === canon) continue
+
+        const bestByNodeKey = new Map<
+          string,
+          { node_key: string; pos_x: number; pos_y: number; updated_at: string; manual_group_id: string | null }
+        >()
+
+        for (const nid of uniqueNids) {
+          const rows = readPositions.all(nid) as {
+            node_key: string
+            pos_x: number
+            pos_y: number
+            updated_at: string
+            manual_group_id: string | null
+          }[]
+          for (const row of rows) {
+            const cur = bestByNodeKey.get(row.node_key)
+            if (!cur) {
+              bestByNodeKey.set(row.node_key, row)
+              continue
+            }
+            if (String(row.updated_at) > String(cur.updated_at)) {
+              bestByNodeKey.set(row.node_key, row)
+              continue
+            }
+            if (String(row.updated_at) === String(cur.updated_at)) {
+              // Tie-break: keep membership when one has it.
+              if (!cur.manual_group_id && row.manual_group_id) bestByNodeKey.set(row.node_key, row)
+            }
+          }
+        }
+
+        for (const nid of uniqueNids) deletePositionsForNid.run(nid)
+        for (const row of bestByNodeKey.values()) {
+          insertPosition.run(canon, row.node_key, row.pos_x, row.pos_y, row.updated_at, row.manual_group_id)
+        }
+      }
+
+      // 3) Remap simple referencing tables (no uniqueness constraints on network_id).
+      const simpleTables: { name: string; col: string }[] = [
+        { name: 'devices', col: 'network_id' },
+        { name: 'arp_entries', col: 'network_id' },
+        { name: 'map_manual_groups', col: 'network_id' },
+        { name: 'alert_rules', col: 'network_id' },
+        { name: 'event_logs', col: 'network_id' }
+      ]
+
+      for (const t of simpleTables) {
+        // Skip if column/table missing (defensive).
+        try {
+          const cols = database.prepare(`PRAGMA table_info(${t.name})`).all() as { name: string }[]
+          if (!cols.some((c) => c.name === t.col)) continue
+        } catch {
+          continue
+        }
+        const distinct = database
+          .prepare(
+            `SELECT DISTINCT ${t.col} AS nid
+             FROM ${t.name}
+             WHERE ${t.col} IS NOT NULL AND TRIM(${t.col}) != ''`
+          )
+          .all() as { nid: string }[]
+
+        const update = database.prepare(`UPDATE ${t.name} SET ${t.col} = ? WHERE ${t.col} = ?`)
+        for (const r of distinct) {
+          const old = String(r.nid)
+          const next = normalizeNetworkId(old)
+          if (next && next !== old) update.run(next, old)
+        }
+      }
+    })
+
+    tx()
+  } catch (e) {
+    console.error('[db] migrateCanonicalizeNetworkIds failed', e)
+    throw e
+  }
 }
 
 function migrateDeviceGroupsSchema(database: Database.Database): void {
@@ -189,6 +400,7 @@ function migrateMapManualGroupsSchema(database: Database.Database): void {
       pos_y REAL NOT NULL,
       width REAL NOT NULL,
       height REAL NOT NULL,
+      contents_locked INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -199,6 +411,11 @@ function migrateMapManualGroupsSchema(database: Database.Database): void {
     database.exec(
       `ALTER TABLE map_layout_positions ADD COLUMN manual_group_id TEXT REFERENCES map_manual_groups(id) ON DELETE SET NULL`
     )
+  }
+
+  const gcols = database.prepare(`PRAGMA table_info(map_manual_groups)`).all() as { name: string }[]
+  if (!gcols.some((c) => c.name === 'contents_locked')) {
+    database.exec(`ALTER TABLE map_manual_groups ADD COLUMN contents_locked INTEGER NOT NULL DEFAULT 1`)
   }
 }
 

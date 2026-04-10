@@ -322,6 +322,7 @@ export interface MapManualGroup {
   y: number
   width: number
   height: number
+  contentsLocked: boolean
   createdAt: string
   updatedAt: string
 }
@@ -352,6 +353,27 @@ export interface CreateMapManualGroupPayload {
 export interface RenameMapManualGroupPayload {
   id: string
   name: string
+}
+
+export interface SetMapManualGroupLockPayload {
+  id: string
+  locked: boolean
+}
+
+export interface MapManualGroupLockChangedPayload {
+  id: string
+  locked: boolean
+}
+
+export type MapNodeContextMenuTarget =
+  | { kind: 'manualGroup'; id: string; contentsLocked: boolean }
+  | { kind: 'device'; id: string }
+
+export interface ShowMapNodeContextMenuPayload {
+  /** Screen coordinates in CSS pixels. */
+  x: number
+  y: number
+  target: MapNodeContextMenuTarget
 }
 
 /** `mirror_os`: SQLite tracks the OS ARP table (rows drop when OS drops). `app_owned`: merge discoveries and age out by TTL. */
