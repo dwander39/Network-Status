@@ -847,6 +847,12 @@ tr:last-child td {
   outline: none;
 }
 
+/* Gateway: RF wraps custom node; mirror device selected ring on wrapper so selection is obvious. */
+.map-flow .react-flow__node-gateway.selected {
+  border-radius: var(--radius-lg);
+  box-shadow: 0 0 0 2px var(--color-primary-focus-ring);
+}
+
 .map-flow__controls button {
   background: var(--color-secondary-bg);
   border: 1px solid var(--color-border);
@@ -891,9 +897,24 @@ tr:last-child td {
   border-color: var(--color-accent-border);
 }
 
-.map-gateway-node:hover {
+.map-gateway-node:hover:not(.map-gateway-node--selected) {
   border-color: var(--color-accent-border);
   background: var(--map-device-hover-surface);
+}
+
+.map-gateway-node--selected {
+  border-color: var(--color-accent-border);
+  box-shadow:
+    var(--shadow-node),
+    0 0 0 2px var(--color-primary-focus-ring);
+}
+
+.map-gateway-node--selected:hover {
+  border-color: var(--color-accent-border);
+  background: var(--color-surface);
+  box-shadow:
+    var(--shadow-node),
+    0 0 0 2px var(--color-primary-focus-ring);
 }
 
 .map-device-node--selected {
@@ -1117,18 +1138,25 @@ tr:last-child td {
 
 .map-manual-group {
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
   border: 1px dashed var(--color-manual-group-dash);
   border-radius: var(--radius-xl);
   background: var(--color-manual-group-bg);
   pointer-events: auto;
+  min-height: 0;
 }
 
 .map-manual-group--selected {
   border-color: var(--color-manual-group-selected-border);
   background: var(--color-accent-bg-soft);
+  box-shadow:
+    var(--shadow-node),
+    0 0 0 2px var(--color-primary-focus-ring);
 }
 
 .map-manual-group__chrome {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1140,6 +1168,19 @@ tr:last-child td {
   border-radius: var(--radius-md);
   font-size: var(--font-size-sm);
   color: var(--color-text);
+}
+
+.map-manual-group__drag-surface {
+  flex: 1;
+  min-height: 2rem;
+  margin: 0 var(--space-px-4) var(--space-px-4);
+  border-radius: var(--radius-md);
+  cursor: grab;
+  user-select: none;
+}
+
+.map-manual-group__drag-surface:active {
+  cursor: grabbing;
 }
 
 .map-manual-group__drag-handle {

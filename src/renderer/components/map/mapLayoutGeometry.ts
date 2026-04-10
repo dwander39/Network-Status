@@ -49,6 +49,11 @@ export function applyDeviceGroupDropResolution(
     curParent?.type === 'manualGroup' &&
     Boolean((curParent.data as { contentsLocked?: boolean } | undefined)?.contentsLocked)
 
+  if (curLocked && curParent?.type === 'manualGroup') {
+    /* Locked groups: devices must not change membership or position via this resolver (drag is disabled on the node). */
+    return nds
+  }
+
   const rawHit = pickManualGroupForDrop(getIntersectingNodes(cur, true, nds))
   const hitParent = rawHit?.type === 'manualGroup' ? rawHit : null
   const hitLocked = Boolean(
@@ -65,25 +70,6 @@ export function applyDeviceGroupDropResolution(
   const next = nds.map((n) => (n.id === cur.id ? { ...n } : n))
   const target = next.find((n) => n.id === cur.id)
   if (!target || target.type !== 'device') return nds
-  if (curLocked && curParent?.type === 'manualGroup') {
-    // Locked group: always keep membership; clamp within group bounds.
-    const gw = (curParent.data as { width?: number } | undefined)?.width ?? 380
-    const gh = (curParent.data as { height?: number } | undefined)?.height ?? 220
-    const margin = 14
-    const deviceW = target.measured?.width ?? target.width ?? 180
-    const deviceH = target.measured?.height ?? target.height ?? 116
-    const minX = curParent.position.x + margin
-    const minY = curParent.position.y + margin
-    const maxX = curParent.position.x + Math.max(margin, gw - margin - deviceW)
-    const maxY = curParent.position.y + Math.max(margin, gh - margin - deviceH)
-    const clampedAbs = {
-      x: Math.min(Math.max(abs.x, minX), maxX),
-      y: Math.min(Math.max(abs.y, minY), maxY)
-    }
-    target.parentId = curParent.id
-    target.position = { x: clampedAbs.x - curParent.position.x, y: clampedAbs.y - curParent.position.y }
-    return next
-  }
 
   if (hit) {
     // Unlocked or same-group move: allow assign.

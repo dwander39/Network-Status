@@ -82,11 +82,7 @@ function ManualGroupNodeInner({ data, selected }: NodeProps<ManualGroupFlowNode>
       className={`map-manual-group${selected ? ' map-manual-group--selected' : ''}`}
       style={{ width: data.width, height: data.height }}
     >
-      <div className="map-manual-group__chrome">
-        {/* Only this strip starts a drag — title clicks open inline edit without moving the group. */}
-        <div className="map-manual-group__drag-handle" title="Drag to move group" aria-hidden>
-          ⠿
-        </div>
+      <div className="map-manual-group__chrome nodrag nopan">
         {data.contentsLocked ? (
           <div className="map-manual-group__lock" title="Group contents locked" aria-hidden>
             🔒
@@ -144,6 +140,11 @@ function ManualGroupNodeInner({ data, selected }: NodeProps<ManualGroupFlowNode>
           </button>
         </div>
       </div>
+      {/*
+        Drag surface below the title bar: moving the group uses this area (locked: body includes space over devices;
+        devices in locked groups are non-draggable and clicks on them select the group from MapView).
+      */}
+      <div className="map-manual-group__drag-surface" title="Drag to move group" aria-hidden />
     </div>
   )
 }

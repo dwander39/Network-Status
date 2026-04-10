@@ -26,16 +26,19 @@ import { MAP_GATEWAY_NODE_ID } from './map/flowIds'
 import { ManualGroupNode } from './map/ManualGroupNode'
 import { buildAutoLayoutNodes, parseAutoGroupNodeId, type MapAutoGroupMode } from './map/mapAutoLayout'
 import {
-  applyMarqueeDeviceSelection,
+  applyMarqueeMapSelection,
   clearSelection,
+  deviceChildOfLockedManualGroup,
   initialMapSelection,
   mapSelectionDeviceCount,
+  mapSelectionGatewayCount,
   mapSelectionManualGroupCount,
   nodeMatchesMapSelection,
   reconcileSelectionForLayoutMode,
   selectAutoGroup,
   selectDevice,
   selectDevicesMulti,
+  selectGateway,
   selectMixedDevicesAndGroups,
   selectManualGroup,
   selectionStillValidForDevices,
@@ -44,8 +47,9 @@ import {
 } from './map/mapSelection'
 import {
   deviceIdsInFlowRect,
+  gatewayInFlowRect,
   normalizeFlowRect,
-  pickManualGroupTargetInRect,
+  pickManualGroupIdsInRect,
   type MarqueeHitMode,
   type FlowRect
 } from './map/mapMarquee'
@@ -87,6 +91,16 @@ function defaultDevicePosition(index: number, total: number): XYPosition {
   const col = index % cols
   const row = Math.floor(index / cols)
   return { x: 60 + col * 210, y: 340 + row * 132 }
+}
+
+/** Title/chrome band inside manual group nodes — used when auto-sizing / aligning children. */
+const GROUP_LAYOUT_CHROME_PX = 52
+
+function layoutDeviceMeasuredSize(n: Node): { w: number; h: number } {
+  return {
+    w: n.measured?.width ?? n.width ?? 180,
+    h: n.measured?.height ?? n.height ?? 116
+  }
 }
 
 /** Build IPC payload: absolute positions + membership; group bounds for SQLite `map_manual_groups`. */
@@ -145,7 +159,7 @@ function manualGroupFlowNodeFromRow(g: MapManualGroup, handlers: GroupHandlers):
     position: { x: g.x, y: g.y },
     zIndex: 0,
     style: { width: g.width, height: g.height },
-    dragHandle: '.map-manual-group__drag-handle',
+    dragHandle: '.map-manual-group__drag-surface',
     data: {
       name: g.name,
       width: g.width,
@@ -191,7 +205,8 @@ function buildMapNodes(
     position: gwPos,
     zIndex: 1,
     data: { gatewayIp },
-    draggable: true
+    draggable: true,
+    selectable: true
   }
 
   const groupNodes: Node[] = bundle.manualGroups.map((g) => ({
@@ -200,7 +215,7 @@ function buildMapNodes(
     position: prevById.get(g.id)?.position ?? { x: g.x, y: g.y },
     zIndex: 0,
     style: { width: g.width, height: g.height },
-    dragHandle: '.map-manual-group__drag-handle',
+    dragHandle: '.map-manual-group__drag-surface',
     data: {
       name: g.name,
       width: g.width,
@@ -241,6 +256,7 @@ function buildMapNodes(
 
     if (targetParent) {
       const g = groupMap.get(targetParent)!
+      const lockedChild = Boolean(g.contentsLocked)
       let pos: XYPosition
       if (prevNode?.type === 'device' && prevNode.parentId === targetParent) {
         pos = prevNode.position
@@ -256,7 +272,8 @@ function buildMapNodes(
         position: pos,
         zIndex: 2,
         data: { device: d },
-        draggable: true
+        draggable: !lockedChild,
+        selectable: true
       })
     } else {
       let pos: XYPosition
@@ -273,7 +290,8 @@ function buildMapNodes(
         position: pos,
         zIndex: 2,
         data: { device: d },
-        draggable: true
+        draggable: true,
+        selectable: true
       })
     }
   })
@@ -448,6 +466,111 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     },
     [api, networkId]
   )
+
+  const handleManualGroupAutoSize = useCallback(
+    (groupId: string) => {
+      if (layoutModeRef.current !== 'manual') return
+      const nid = networkId?.trim()
+      if (!nid) return
+      const nds = getNodes()
+      const g = nds.find((n) => n.id === groupId && n.type === 'manualGroup')
+      if (!g) return
+      const gd = g.data as { name: string; width: number; height: number }
+      const members = nds.filter((n) => n.type === 'device' && n.parentId === groupId)
+      let minX = 0
+      let minY = GROUP_LAYOUT_CHROME_PX
+      let maxX = 220
+      let maxY = GROUP_LAYOUT_CHROME_PX + 100
+      if (members.length > 0) {
+        minX = Infinity
+        minY = Infinity
+        maxX = -Infinity
+        maxY = -Infinity
+        for (const m of members) {
+          const { w, h } = layoutDeviceMeasuredSize(m)
+          const x0 = m.position.x
+          const y0 = m.position.y
+          const x1 = x0 + w
+          const y1 = y0 + h
+          minX = Math.min(minX, x0)
+          minY = Math.min(minY, y0)
+          maxX = Math.max(maxX, x1)
+          maxY = Math.max(maxY, y1)
+        }
+      }
+      const pad = 24
+      const minW = 220
+      const minH = 140
+      const newW = Math.max(minW, maxX - minX + pad * 2)
+      const newH = Math.max(minH, maxY - minY + pad * 2)
+      const next = nds.map((n) => {
+        if (n.id !== groupId || n.type !== 'manualGroup') return n
+        const style = { ...(n.style as CSSProperties), width: newW, height: newH }
+        const prevData = n.data as {
+          name: string
+          width: number
+          height: number
+          contentsLocked?: boolean
+          onCommitRename: (s: string) => void
+          onDelete: () => void
+        }
+        return {
+          ...n,
+          style,
+          data: { ...prevData, name: gd.name, width: newW, height: newH }
+        }
+      })
+      setNodesState(next)
+      setSavedBundle((bundle) => mergeDeviceGatewayPositionsIntoBundle(bundle, next))
+      void persistLayoutSnapshot(next)
+    },
+    [getNodes, networkId, persistLayoutSnapshot, setNodesState, setSavedBundle]
+  )
+
+  const handleManualGroupAutoAlign = useCallback(
+    (groupId: string) => {
+      if (layoutModeRef.current !== 'manual') return
+      const nid = networkId?.trim()
+      if (!nid) return
+      const nds = getNodes()
+      const g = nds.find((n) => n.id === groupId && n.type === 'manualGroup')
+      if (!g) return
+      const cellW = 200
+      const cellH = 126
+      const cols = 2
+      const ox = 20
+      const oy = GROUP_LAYOUT_CHROME_PX + 12
+      const members = nds
+        .filter((n) => n.type === 'device' && n.parentId === groupId)
+        .slice()
+        .sort((a, b) => {
+          const da = (a.data as { device: Device }).device
+          const db = (b.data as { device: Device }).device
+          return da.name.localeCompare(db.name, undefined, { sensitivity: 'base' })
+        })
+      const next = nds.map((n) => {
+        const idx = members.findIndex((m) => m.id === n.id)
+        if (idx < 0) return n
+        const col = idx % cols
+        const row = Math.floor(idx / cols)
+        return {
+          ...n,
+          position: { x: ox + col * cellW, y: oy + row * cellH }
+        }
+      })
+      setNodesState(next)
+      setSavedBundle((bundle) => mergeDeviceGatewayPositionsIntoBundle(bundle, next))
+      void persistLayoutSnapshot(next)
+    },
+    [getNodes, networkId, persistLayoutSnapshot, setNodesState, setSavedBundle]
+  )
+
+  useEffect(() => {
+    return api.onMapManualGroupLayoutAction((p) => {
+      if (p.action === 'autoSize') handleManualGroupAutoSize(p.groupId)
+      else handleManualGroupAutoAlign(p.groupId)
+    })
+  }, [api, handleManualGroupAutoAlign, handleManualGroupAutoSize])
 
   const clearMapHistory = useCallback(() => {
     undoStackRef.current = []
@@ -694,9 +817,16 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     setMapSelection((s) => {
       if (s.kind === 'multi') {
         const next = s.deviceIds.filter((id) => ids.has(id))
-        if (next.length === 0) return clearSelection()
+        const gs = s.manualGroupIds ?? []
+        const incGw = Boolean(s.includeGateway)
+        if (next.length === 0) {
+          if (gs.length > 0) return selectMixedDevicesAndGroups([], gs, { includeGateway: incGw })
+          if (incGw) return selectGateway()
+          return clearSelection()
+        }
         if (next.length === s.deviceIds.length) return s
-        return selectDevicesMulti(next)
+        if (gs.length === 0 && !incGw) return selectDevicesMulti(next)
+        return selectMixedDevicesAndGroups(next, gs, { includeGateway: incGw })
       }
       return selectionStillValidForDevices(s, ids) ? s : clearSelection()
     })
@@ -714,7 +844,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     setNodesState((nds) => {
       let changed = false
       const next = nds.map((n) => {
-        const sel = nodeMatchesMapSelection(n, mapSelection, layoutMode)
+        const sel = nodeMatchesMapSelection(n, mapSelection, layoutMode, nds)
         if (n.selected === sel) return n
         changed = true
         return { ...n, selected: sel }
@@ -863,18 +993,26 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     [getIntersectingNodes, getNodes, pushMapHistory, schedulePersist, setNodesState, setSavedBundle]
   )
 
-  const onNodeClick = useCallback((_e: React.MouseEvent, node: Node) => {
-    if (node.type === 'device') {
-      setMapSelection(selectDevice(node.id))
-    } else if (node.type === 'manualGroup') {
-      setMapSelection(selectManualGroup(node.id))
-    } else if (node.type === 'autoGroup') {
-      const p = parseAutoGroupNodeId(node.id)
-      if (p) setMapSelection(selectAutoGroup(p.groupKey, p.autoGroupBy))
-    } else if (node.type === 'gateway' || node.id === MAP_GATEWAY_NODE_ID) {
-      setMapSelection(clearSelection())
-    }
-  }, [])
+  const onNodeClick = useCallback(
+    (_e: React.MouseEvent, node: Node) => {
+      const nds = getNodes()
+      if (node.type === 'device') {
+        if (deviceChildOfLockedManualGroup(node, nds) && node.parentId) {
+          setMapSelection(selectManualGroup(node.parentId))
+          return
+        }
+        setMapSelection(selectDevice(node.id))
+      } else if (node.type === 'manualGroup') {
+        setMapSelection(selectManualGroup(node.id))
+      } else if (node.type === 'autoGroup') {
+        const p = parseAutoGroupNodeId(node.id)
+        if (p) setMapSelection(selectAutoGroup(p.groupKey, p.autoGroupBy))
+      } else if (node.type === 'gateway' || node.id === MAP_GATEWAY_NODE_ID) {
+        setMapSelection(selectGateway())
+      }
+    },
+    [getNodes]
+  )
 
   const onNodeContextMenu = useCallback(
     (e: React.MouseEvent, node: Node) => {
@@ -1014,28 +1152,17 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       const nds = getNodes()
       const leftToRight = draft.current.x >= draft.start.x
       const mode: MarqueeHitMode = leftToRight ? 'contain' : 'intersect'
-      const groupTarget = pickManualGroupTargetInRect(nds, rect, mode)
-      if (groupTarget) {
-        const gn = nds.find((n) => n.id === groupTarget.id && n.type === 'manualGroup')
-        const locked = Boolean((gn?.data as { contentsLocked?: boolean } | undefined)?.contentsLocked ?? true)
-        if (locked) {
-          setMapSelection(selectManualGroup(groupTarget.id))
-          return
-        }
-        // Unlocked group: only when fully enclosed (LTR) do we produce a mixed selection (group + contents).
-        if (mode === 'contain' && groupTarget.fullySelected) {
-          const members = nds.filter((n) => n.type === 'device' && n.parentId === groupTarget.id).map((n) => n.id)
-          setMapSelection(selectMixedDevicesAndGroups(members, [groupTarget.id]))
-          return
-        }
-        // Otherwise, select the group only (no mixed selection on touch).
-        setMapSelection(selectManualGroup(groupTarget.id))
-        return
-      }
-
-      const picked = deviceIdsInFlowRect(nds, rect, mode)
+      let deviceIds = deviceIdsInFlowRect(nds, rect, mode)
+      deviceIds = deviceIds.filter((id) => {
+        const dn = nds.find((x) => x.id === id)
+        return dn ? !deviceChildOfLockedManualGroup(dn, nds) : false
+      })
+      const groupIds = pickManualGroupIdsInRect(nds, rect, mode)
+      const gwHit = gatewayInFlowRect(nds, rect, mode)
       const additive = e.shiftKey
-      setMapSelection((cur) => applyMarqueeDeviceSelection(cur, picked, additive))
+      setMapSelection((cur) =>
+        applyMarqueeMapSelection(cur, { devices: deviceIds, groups: groupIds, gateway: gwHit }, additive)
+      )
     },
     [blurNonInputFocusInMap, getNodes, setMapSelection]
   )
@@ -1127,6 +1254,15 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
   const manualChrome = layoutMode === 'manual'
   const multiSelectDeviceCount = mapSelectionDeviceCount(mapSelection)
   const multiSelectGroupCount = mapSelectionManualGroupCount(mapSelection)
+  const multiSelectGatewayCount = mapSelectionGatewayCount(mapSelection)
+  const multiSelectStatusParts: string[] = []
+  if (multiSelectGatewayCount > 0) multiSelectStatusParts.push('Gateway')
+  if (multiSelectGroupCount > 0) {
+    multiSelectStatusParts.push(`${multiSelectGroupCount} group${multiSelectGroupCount === 1 ? '' : 's'}`)
+  }
+  if (multiSelectDeviceCount > 0) {
+    multiSelectStatusParts.push(`${multiSelectDeviceCount} device${multiSelectDeviceCount === 1 ? '' : 's'}`)
+  }
   canRecordHistoryRef.current = manualChrome && canPersist
   void mapHistTick
   const canMapUndo = manualChrome && undoStackRef.current.length > 0
@@ -1267,14 +1403,9 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
           <Background color="#2e3440" gap={20} size={1} />
           <Controls className="map-flow__controls" showInteractive={false} />
         </ReactFlow>
-        {manualChrome && (multiSelectDeviceCount > 1 || multiSelectGroupCount > 0) ? (
+        {manualChrome && multiSelectStatusParts.length > 0 ? (
           <div className="map-flow__status-overlay" role="status" aria-live="polite">
-            <span className="muted">
-              {multiSelectGroupCount > 0 ? `${multiSelectGroupCount} group${multiSelectGroupCount === 1 ? '' : 's'}` : ''}
-              {multiSelectGroupCount > 0 && multiSelectDeviceCount > 0 ? ' + ' : ''}
-              {multiSelectDeviceCount > 0 ? `${multiSelectDeviceCount} device${multiSelectDeviceCount === 1 ? '' : 's'}` : ''}
-              {' selected'}
-            </span>
+            <span className="muted">{multiSelectStatusParts.join(' + ')} selected</span>
           </div>
         ) : null}
         {manualChrome && marqueeFlow ? (

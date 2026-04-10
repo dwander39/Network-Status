@@ -47,6 +47,7 @@ export const IPC = {
   SET_MAP_MANUAL_GROUP_LOCK: 'mapLayout:setManualGroupLock',
   SHOW_MAP_NODE_CONTEXT_MENU: 'mapLayout:showNodeContextMenu',
   ON_MAP_MANUAL_GROUP_LOCK_CHANGED: 'mapLayout:manualGroupLockChanged',
+  ON_MAP_MANUAL_GROUP_LAYOUT_ACTION: 'mapLayout:manualGroupLayoutAction',
   GET_EVENT_LOGS: 'eventLogs:get',
   ON_EVENT_LOG_ADDED: 'eventLogs:added',
   CLEAR_EVENT_LOGS: 'eventLogs:clear',

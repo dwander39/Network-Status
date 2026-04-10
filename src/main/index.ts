@@ -609,20 +609,38 @@ function registerIpc(): void {
     if (payload.target.kind === 'manualGroup') {
       const locked = Boolean(payload.target.contentsLocked)
       // Build menu with explicit click handlers (no IPC recursion).
+      const gid = payload.target.id
       const menu = Menu.buildFromTemplate([
         {
           label: locked ? 'Unlock group' : 'Lock group',
           click: () => {
             const nextLocked = !locked
-            setManualGroupContentsLocked(getDatabase(), { id: payload.target.id, locked: nextLocked })
+            setManualGroupContentsLocked(getDatabase(), { id: gid, locked: nextLocked })
             mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, {
-              id: payload.target.id,
+              id: gid,
               locked: nextLocked
             })
           }
         },
         { type: 'separator' },
-        { label: locked ? 'Contents locked' : 'Contents unlocked', enabled: false }
+        {
+          label: 'Auto size',
+          click: () => {
+            mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, {
+              action: 'autoSize',
+              groupId: gid
+            })
+          }
+        },
+        {
+          label: 'Auto align',
+          click: () => {
+            mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, {
+              action: 'autoAlign',
+              groupId: gid
+            })
+          }
+        }
       ])
       menu.popup({ window: mainWindow, x, y })
       return

@@ -7,6 +7,7 @@
 
 import type { Node, XYPosition } from '@xyflow/react'
 
+import { MAP_GATEWAY_NODE_ID } from './flowIds'
 import { absoluteNodePosition } from './mapLayoutGeometry'
 
 /** Fallback size when RF has not measured the node yet (matches card CSS ballpark). */
@@ -106,6 +107,43 @@ function rectContainsPoint(r: FlowRect, p: XYPosition): boolean {
   return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
 }
 
+function manualGroupMarqueeCandidates(
+  nodes: readonly Node[],
+  rect: FlowRect,
+  mode: MarqueeHitMode
+): { id: string; ratio: number; fullySelected: boolean }[] {
+  const out: { id: string; ratio: number; fullySelected: boolean }[] = []
+  for (const n of nodes) {
+    if (n.type !== 'manualGroup') continue
+    const gb = manualGroupFlowBounds(n)
+    const fullySelected = axisAlignedContains(rect, gb)
+    const hit = mode === 'contain' ? fullySelected : axisAlignedIntersect(rect, gb)
+    if (!hit) continue
+    const area = gb.width * gb.height
+    const inter = intersectionArea(rect, gb)
+    const ratio = area > 0 ? inter / area : 0
+    const center = { x: gb.x + gb.width / 2, y: gb.y + gb.height / 2 }
+    const meaningful = rectContainsPoint(rect, center) || ratio >= 0.18 || fullySelected
+    if (!meaningful) continue
+    out.push({ id: n.id, ratio, fullySelected })
+  }
+  return out
+}
+
+/**
+ * All manual groups meaningfully hit by the marquee (overlap / enclosure rules).
+ * Sorted by overlap ratio descending, then id (stable).
+ */
+export function pickManualGroupIdsInRect(
+  nodes: readonly Node[],
+  rect: FlowRect,
+  mode: MarqueeHitMode
+): string[] {
+  const c = manualGroupMarqueeCandidates(nodes, rect, mode)
+  c.sort((a, b) => b.ratio - a.ratio || a.id.localeCompare(b.id))
+  return c.map((x) => x.id)
+}
+
 /**
  * Manual group target for marquee.
  *
@@ -119,20 +157,23 @@ export function pickManualGroupTargetInRect(
   rect: FlowRect,
   mode: MarqueeHitMode
 ): { id: string; fullySelected: boolean } | null {
-  let best: { id: string; score: number; fullySelected: boolean } | null = null
-  for (const n of nodes) {
-    if (n.type !== 'manualGroup') continue
-    const gb = manualGroupFlowBounds(n)
-    const fullySelected = axisAlignedContains(rect, gb)
-    const hit = mode === 'contain' ? fullySelected : axisAlignedIntersect(rect, gb)
-    if (!hit) continue
-    const area = gb.width * gb.height
-    const inter = intersectionArea(rect, gb)
-    const ratio = area > 0 ? inter / area : 0
-    const center = { x: gb.x + gb.width / 2, y: gb.y + gb.height / 2 }
-    const meaningful = rectContainsPoint(rect, center) || ratio >= 0.18 || fullySelected
-    if (!meaningful) continue
-    if (!best || ratio > best.score) best = { id: n.id, score: ratio, fullySelected }
+  const c = manualGroupMarqueeCandidates(nodes, rect, mode)
+  let best: (typeof c)[0] | null = null
+  for (const x of c) {
+    if (!best || x.ratio > best.ratio) best = x
   }
   return best ? { id: best.id, fullySelected: best.fullySelected } : null
+}
+
+/** True if the gateway node’s bounds intersect/contain per `mode`. */
+export function gatewayInFlowRect(
+  nodes: readonly Node[],
+  rect: FlowRect,
+  mode: MarqueeHitMode
+): boolean {
+  const gw = nodes.find((n) => n.type === 'gateway' || n.id === MAP_GATEWAY_NODE_ID)
+  if (!gw) return false
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  const b = deviceFlowBounds(gw, byId)
+  return mode === 'contain' ? axisAlignedContains(rect, b) : axisAlignedIntersect(rect, b)
 }

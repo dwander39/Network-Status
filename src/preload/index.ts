@@ -22,7 +22,8 @@ import type {
   SaveAlertRulePayload,
   SaveDeviceGroupPayload,
   SaveDevicePayload,
-  MapLayoutSavePayload
+  MapLayoutSavePayload,
+  MapManualGroupLayoutActionPayload
 } from '@shared/types'
 
 export interface ArpPayload {
@@ -129,6 +130,13 @@ const api = {
     }
     ipcRenderer.on(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, handler)
     return () => ipcRenderer.removeListener(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, handler)
+  },
+  onMapManualGroupLayoutAction: (cb: (p: MapManualGroupLayoutActionPayload) => void): (() => void) => {
+    const handler = (_e: import('electron').IpcRendererEvent, payload: MapManualGroupLayoutActionPayload): void => {
+      cb(payload)
+    }
+    ipcRenderer.on(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, handler)
+    return () => ipcRenderer.removeListener(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, handler)
   },
   onDeviceGroupsChanged: (cb: (groups: DeviceGroup[]) => void): (() => void) => {
     const handler = (_e: import('electron').IpcRendererEvent, groups: DeviceGroup[]): void => {

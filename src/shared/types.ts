@@ -365,6 +365,12 @@ export interface MapManualGroupLockChangedPayload {
   locked: boolean
 }
 
+/** Dispatched from the native group context menu (main → renderer) to run layout helpers. */
+export interface MapManualGroupLayoutActionPayload {
+  action: 'autoSize' | 'autoAlign'
+  groupId: string
+}
+
 export type MapNodeContextMenuTarget =
   | { kind: 'manualGroup'; id: string; contentsLocked: boolean }
   | { kind: 'device'; id: string }
