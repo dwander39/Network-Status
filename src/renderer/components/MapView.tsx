@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties
+} from 'react'
 import {
   Background,
-  Controls,
+  Panel,
   ReactFlow,
   ReactFlowProvider,
   useEdgesState,
@@ -13,7 +21,15 @@ import {
   type XYPosition
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import type { Device, MapLayoutBundle, MapLayoutSavePayload, MapManualGroup, NetworkInfo } from '@shared/types'
+import type {
+  Device,
+  DeviceGroup,
+  MapLayoutBundle,
+  MapLayoutSavePayload,
+  MapManualGroup,
+  NetworkInfo,
+  SaveDevicePayload
+} from '@shared/types'
 import type { DeviceNodeData } from './map/DeviceNode'
 import { useConfirmAction } from '../confirm/ConfirmDialogContext'
 import {
@@ -25,6 +41,7 @@ import { DeviceNode } from './map/DeviceNode'
 import { GatewayNode } from './map/GatewayNode'
 import { MAP_GATEWAY_NODE_ID } from './map/flowIds'
 import { ManualGroupNode } from './map/ManualGroupNode'
+import { MapViewInspector } from './map/MapViewInspector'
 import { buildAutoLayoutNodes, parseAutoGroupNodeId, type MapAutoGroupMode } from './map/mapAutoLayout'
 import {
   applyMarqueeMapSelection,
@@ -66,6 +83,11 @@ import {
   type DeviceLayoutSnap
 } from './map/mapLayoutGeometry'
 import type { MapLayoutCommand } from './map/mapLayoutHistory'
+import {
+  computeMapTranslateExtent,
+  MAP_DEFAULT_ZOOM,
+  mapSelectionToViewportNodeIds
+} from './map/mapViewport'
 
 /** Persisted manual group minimum bounds (matches Auto size floor). */
 const MANUAL_GROUP_MIN_W = 220
@@ -93,6 +115,24 @@ function sanitizeGroupBounds(raw: GroupBounds, minW: number, minH: number): Grou
     y,
     width: Math.max(minW, wIn),
     height: Math.max(minH, hIn)
+  }
+}
+
+/** Persisted map inspector inner width (px); handle adds 6px in grid column. */
+const MAP_INSPECTOR_WIDTH_LS_KEY = 'system-status.mapInspectorInnerWidthPx'
+const MAP_INSPECTOR_WIDTH_MIN = 260
+const MAP_INSPECTOR_WIDTH_MAX = 520
+const MAP_INSPECTOR_WIDTH_DEFAULT = 280
+
+function readStoredMapInspectorWidth(): number {
+  try {
+    const raw = localStorage.getItem(MAP_INSPECTOR_WIDTH_LS_KEY)
+    if (raw == null) return MAP_INSPECTOR_WIDTH_DEFAULT
+    const n = Number(raw)
+    if (!Number.isFinite(n)) return MAP_INSPECTOR_WIDTH_DEFAULT
+    return Math.min(MAP_INSPECTOR_WIDTH_MAX, Math.max(MAP_INSPECTOR_WIDTH_MIN, Math.round(n)))
+  } catch {
+    return MAP_INSPECTOR_WIDTH_DEFAULT
   }
 }
 
@@ -442,13 +482,32 @@ interface MapCanvasProps {
   devices: Device[]
   networkInfo: NetworkInfo | null
   networkId: string | null
+  deviceGroups: DeviceGroup[]
+  onSaveDevice: (payload: SaveDevicePayload) => Promise<void>
 }
 
-function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Element {
+function MapCanvas({
+  devices,
+  networkInfo,
+  networkId,
+  deviceGroups,
+  onSaveDevice
+}: MapCanvasProps): JSX.Element {
   const { confirmAction } = useConfirmAction()
   const api = window.ssApi
-  const { getNodes, getIntersectingNodes, screenToFlowPosition, flowToScreenPosition, fitView } =
-    useReactFlow()
+  const {
+    getNodes,
+    getIntersectingNodes,
+    screenToFlowPosition,
+    flowToScreenPosition,
+    fitView,
+    getNodesBounds,
+    setCenter,
+    getZoom,
+    zoomIn,
+    zoomOut,
+    zoomTo
+  } = useReactFlow()
   const [nodes, setNodesState, onNodesChangeBase] = useNodesState<Node>([])
   /** Selection is app-owned (`mapSelection`); ignore RF `select` changes to avoid split-brain + multi-drag. */
   const onNodesChange = useCallback(
@@ -470,6 +529,11 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
    * again → repeat until the renderer died.
    */
   const [mapGraphRebuildTick, setMapGraphRebuildTick] = useState(0)
+  /** Phase 2C.4 — pan bounds from content + margin + minimum world floor (`translateExtent`). */
+  const translateExtent = useMemo(() => {
+    const rect = nodes.length === 0 ? { x: 0, y: 0, width: 0, height: 0 } : getNodesBounds(nodes)
+    return computeMapTranslateExtent(rect)
+  }, [nodes, mapGraphRebuildTick, getNodesBounds])
   /** After auto modes, rebuild manual nodes from DB snapshot instead of merging auto positions. */
   const prevLayoutModeRef = useRef<MapLayoutMode>('manual')
   /** Debounced persist must read latest mode when the timer fires (avoid saving after switching to auto). */
@@ -478,6 +542,86 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const didInitialFit = useRef(false)
   const flowWrapRef = useRef<HTMLDivElement>(null)
+  const [inspectorInnerWidthPx, setInspectorInnerWidthPx] = useState(readStoredMapInspectorWidth)
+  const inspectorInnerWidthRef = useRef(inspectorInnerWidthPx)
+  inspectorInnerWidthRef.current = inspectorInnerWidthPx
+  const inspectorResizeDragRef = useRef<{ startX: number; startW: number } | null>(null)
+
+  const finishInspectorResize = useCallback((e: React.PointerEvent<HTMLDivElement>, useEventClientX: boolean) => {
+    const d = inspectorResizeDragRef.current
+    if (!d) return
+    inspectorResizeDragRef.current = null
+    if (useEventClientX) {
+      /* Handle is on the inspector’s left: drag left → wider panel. */
+      const w = Math.min(
+        MAP_INSPECTOR_WIDTH_MAX,
+        Math.max(MAP_INSPECTOR_WIDTH_MIN, d.startW + (d.startX - e.clientX))
+      )
+      inspectorInnerWidthRef.current = w
+      setInspectorInnerWidthPx(w)
+    }
+    try {
+      localStorage.setItem(MAP_INSPECTOR_WIDTH_LS_KEY, String(inspectorInnerWidthRef.current))
+    } catch {
+      /* ignore */
+    }
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const onInspectorResizePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!e.isPrimary || e.button !== 0) return
+      inspectorResizeDragRef.current = { startX: e.clientX, startW: inspectorInnerWidthPx }
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+      e.preventDefault()
+    },
+    [inspectorInnerWidthPx]
+  )
+
+  const onInspectorResizePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = inspectorResizeDragRef.current
+    if (!d) return
+    const w = Math.min(
+      MAP_INSPECTOR_WIDTH_MAX,
+      Math.max(MAP_INSPECTOR_WIDTH_MIN, d.startW + (d.startX - e.clientX))
+    )
+    inspectorInnerWidthRef.current = w
+    setInspectorInnerWidthPx(w)
+  }, [])
+
+  const onInspectorResizePointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!e.isPrimary || e.button !== 0) return
+      finishInspectorResize(e, true)
+    },
+    [finishInspectorResize]
+  )
+
+  const onInspectorResizePointerCancel = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      finishInspectorResize(e, false)
+    },
+    [finishInspectorResize]
+  )
+
+  const onInspectorResizeLostPointerCapture = useCallback(() => {
+    if (!inspectorResizeDragRef.current) return
+    inspectorResizeDragRef.current = null
+    try {
+      localStorage.setItem(MAP_INSPECTOR_WIDTH_LS_KEY, String(inspectorInnerWidthRef.current))
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
   /** Phase 2C.2 — marquee in flow space; overlay maps via flowToScreenPosition. */
   const [marqueeFlow, setMarqueeFlow] = useState<{
     start: XYPosition
@@ -507,6 +651,41 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
 
   /** Phase 2C.1 — canonical selection; synced to React Flow `node.selected` for styling only. */
   const [mapSelection, setMapSelection] = useState<MapSelection>(initialMapSelection)
+  /** Inspector-only: device to show while canvas keeps a locked manual group selected (see `onNodeClick`). */
+  const [inspectorPeekDeviceId, setInspectorPeekDeviceId] = useState<string | null>(null)
+
+  const canCenterOnSelection = useMemo(() => {
+    const ids = mapSelectionToViewportNodeIds(mapSelection, layoutMode)
+    if (ids.length === 0) return false
+    const idSet = new Set(getNodes().map((n) => n.id))
+    return ids.some((id) => idSet.has(id))
+  }, [getNodes, layoutMode, mapGraphRebuildTick, mapSelection, nodes])
+
+  const handleFitAllMap = useCallback(() => {
+    void fitView({ padding: 0.14, minZoom: 0.35, maxZoom: 1.5, duration: 320 })
+  }, [fitView])
+
+  const handleCenterOnSelection = useCallback(() => {
+    const ids = mapSelectionToViewportNodeIds(mapSelection, layoutMode)
+    const nds = getNodes()
+    const existing = ids.filter((id) => nds.some((n) => n.id === id))
+    if (existing.length === 0) return
+    const b = getNodesBounds(existing)
+    void setCenter(b.x + b.width / 2, b.y + b.height / 2, { zoom: getZoom(), duration: 260 })
+  }, [getNodes, getNodesBounds, getZoom, layoutMode, mapSelection, setCenter])
+
+  const handleResetZoomView = useCallback(() => {
+    void zoomTo(MAP_DEFAULT_ZOOM, { duration: 220 })
+  }, [zoomTo])
+
+  const handleZoomInMap = useCallback(() => {
+    void zoomIn({ duration: 160 })
+  }, [zoomIn])
+
+  const handleZoomOutMap = useCallback(() => {
+    void zoomOut({ duration: 160 })
+  }, [zoomOut])
+
   /** Avoid re-validating manual-group selection when `savedBundle` is a new object with the same group ids. */
   const prevManualGroupIdsSigRef = useRef<string>('')
 
@@ -677,6 +856,21 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     [getNodes, networkId, persistLayoutSnapshot, setNodesState, setSavedBundle]
   )
 
+  const handleManualGroupSetLock = useCallback(
+    (groupId: string, locked: boolean) => {
+      if (layoutModeRef.current !== 'manual') return
+      if (!locked) {
+        setInspectorPeekDeviceId((peek) => {
+          if (peek == null) return null
+          const dn = getNodes().find((n) => n.id === peek && n.type === 'device')
+          return dn?.parentId === groupId ? null : peek
+        })
+      }
+      void api.setMapManualGroupLock({ id: groupId, locked })
+    },
+    [api, getNodes]
+  )
+
   useEffect(() => {
     return api.onMapManualGroupLayoutAction((p) => {
       if (p.action === 'autoSize') handleManualGroupAutoSize(p.groupId)
@@ -790,6 +984,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       setSavedBundle(b)
       recoverKeyboardAfterDestructiveAction('map:deleteManualGroup', {
         clearGraphSelection: () => {
+          setInspectorPeekDeviceId(null)
           setMapSelection(clearSelection())
           setNodesState((ns) => ns.map((n) => ({ ...n, selected: false })))
           setEdges((es) => es.map((e) => ({ ...e, selected: false })))
@@ -1094,11 +1289,13 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
 
   useEffect(() => {
     clearMapHistory()
+    setInspectorPeekDeviceId(null)
     setMapSelection(clearSelection())
     prevManualGroupIdsSigRef.current = ''
   }, [networkId, clearMapHistory])
 
   useEffect(() => {
+    setInspectorPeekDeviceId(null)
     setMapSelection((s) => reconcileSelectionForLayoutMode(s, layoutMode))
   }, [layoutMode])
 
@@ -1176,6 +1373,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       if (el instanceof HTMLElement && el.closest('input, textarea, select, [contenteditable="true"]')) {
         return
       }
+      setInspectorPeekDeviceId(null)
       setMapSelection(clearSelection())
       blurNonInputFocusInMap()
     }
@@ -1289,15 +1487,20 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       if (node.type === 'device') {
         if (deviceChildOfLockedManualGroup(node, nds) && node.parentId) {
           setMapSelection(selectManualGroup(node.parentId))
+          setInspectorPeekDeviceId(node.id)
           return
         }
+        setInspectorPeekDeviceId(null)
         setMapSelection(selectDevice(node.id))
       } else if (node.type === 'manualGroup') {
+        setInspectorPeekDeviceId(null)
         setMapSelection(selectManualGroup(node.id))
       } else if (node.type === 'autoGroup') {
+        setInspectorPeekDeviceId(null)
         const p = parseAutoGroupNodeId(node.id)
         if (p) setMapSelection(selectAutoGroup(p.groupKey, p.autoGroupBy))
       } else if (node.type === 'gateway' || node.id === MAP_GATEWAY_NODE_ID) {
+        setInspectorPeekDeviceId(null)
         setMapSelection(selectGateway())
       }
     },
@@ -1330,6 +1533,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       blurNonInputFocusInMap()
       return
     }
+    setInspectorPeekDeviceId(null)
     setMapSelection(clearSelection())
     blurNonInputFocusInMap()
   }, [blurNonInputFocusInMap])
@@ -1374,7 +1578,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       if (t.closest('.react-flow__node')) return
       if (t.closest('.react-flow__edge')) return
       if (t.closest('input, textarea, select, [contenteditable="true"], button')) return
-      if (t.closest('.map-flow__controls')) return
+      if (t.closest('.map-flow-viewport-panel')) return
       if (!t.closest('.react-flow')) return
       const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY })
       marqueeDraftRef.current = { start: pos, current: pos }
@@ -1432,6 +1636,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       if (!didActivate) {
         // Treat as an empty-pane click (reliable clear) and ignore the ensuing RF onPaneClick.
         suppressNextPaneClickClearRef.current = true
+        setInspectorPeekDeviceId(null)
         setMapSelection(clearSelection())
         blurNonInputFocusInMap()
         return
@@ -1450,6 +1655,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       const groupIds = pickManualGroupIdsInRect(nds, rect, mode)
       const gwHit = gatewayInFlowRect(nds, rect, mode)
       const additive = e.shiftKey
+      setInspectorPeekDeviceId(null)
       setMapSelection((cur) =>
         applyMarqueeMapSelection(cur, { devices: deviceIds, groups: groupIds, gateway: gwHit }, additive)
       )
@@ -1467,6 +1673,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     if (!nid) return
     await api.resetMapLayout(nid)
     clearMapHistory()
+    setInspectorPeekDeviceId(null)
     setMapSelection(clearSelection())
     setSavedBundle({ manualGroups: [], positions: {} })
     const gw = networkInfo?.gateway ?? null
@@ -1571,12 +1778,13 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
 
   return (
     <div className="map-flow-wrap">
-      {!canPersist ? (
-        <p className="muted map-flow__hint">
-          Connect to a network to save map positions. You can still drag nodes locally.
-        </p>
-      ) : null}
-      <div className="map-flow-toolbar map-flow-toolbar--spaced">
+      <div className="map-view-workspace">
+        {!canPersist ? (
+          <p className="muted map-flow__hint map-view-workspace__connect-hint">
+            Connect to a network to save map positions. You can still drag nodes locally.
+          </p>
+        ) : null}
+        <div className="map-flow-toolbar map-flow-toolbar--spaced map-view-workspace__toolbar">
         <label className="map-flow-toolbar__mode">
           <span className="map-flow-toolbar__mode-label">Layout</span>
           <select
@@ -1648,42 +1856,52 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
           Reset layout
         </button>
       </div>
-      {!manualChrome ? (
-        <div className="map-flow-readonly-banner" role="status">
-          <span className="map-flow-readonly-banner__title">Auto grouped view</span>
-          <span className="map-flow-readonly-banner__meta muted">
-            Manual layout unchanged · read-only · switch to Manual layout to edit positions and groups
-          </span>
-        </div>
-      ) : null}
-      {manualChrome ? (
-        <p className="muted map-flow__hint map-flow__hint--marquee">
-          Manual: left-drag empty space = marquee · Shift+marquee adds · middle-drag or Space+left-drag = pan · right-click = menu
-        </p>
-      ) : (
-        <p className="muted map-flow__hint map-flow__hint--marquee">
-          Auto view: read-only · left-drag or middle-drag empty space = pan · no marquee
-        </p>
-      )}
-      <div
-        className={`map-flow${!manualChrome ? ' map-flow--auto-view' : ''}`}
-        ref={flowWrapRef}
-        onPointerDownCapture={onMapFlowPointerDownCapture}
-        onPointerMove={onMapFlowPointerMove}
-        onPointerUp={onMapFlowPointerUp}
-        onMouseDownCapture={(e) => {
-          // Suppress Windows/browser middle-click autoscroll UI so RF pan works.
-          if (e.button === 1) e.preventDefault()
-        }}
-        onAuxClick={(e) => {
-          if (e.button === 1) e.preventDefault()
-        }}
-        onContextMenu={(e) => {
-          // Canvas context menu deferred; for now reserve right-click and prevent pan/selection side-effects.
-          e.preventDefault()
-        }}
-      >
-        <ReactFlow
+        <div
+          className="map-view-body-grid"
+          style={
+            { ['--map-inspector-inner-w']: `${inspectorInnerWidthPx}px` } as React.CSSProperties
+          }
+        >
+          <div className="map-view-body-grid__gutter">
+            {!manualChrome ? (
+              <div className="map-flow-readonly-banner" role="status">
+                <span className="map-flow-readonly-banner__title">Auto grouped view</span>
+                <span className="map-flow-readonly-banner__meta muted">
+                  Manual layout unchanged · read-only · switch to Manual layout to edit positions and groups
+                </span>
+              </div>
+            ) : null}
+            {manualChrome ? (
+              <p className="muted map-flow__hint map-flow__hint--marquee">
+                Manual: left-drag empty space = marquee · Shift+marquee adds · middle-drag or Space+left-drag = pan ·
+                right-click = menu
+              </p>
+            ) : (
+              <p className="muted map-flow__hint map-flow__hint--marquee">
+                Auto view: read-only · left-drag or middle-drag empty space = pan · no marquee
+              </p>
+            )}
+          </div>
+          <div className="map-view-body-grid__inspector-top-spacer" aria-hidden />
+          <div
+            className={`map-flow map-view-body-grid__map${!manualChrome ? ' map-flow--auto-view' : ''}`}
+            ref={flowWrapRef}
+            onPointerDownCapture={onMapFlowPointerDownCapture}
+            onPointerMove={onMapFlowPointerMove}
+            onPointerUp={onMapFlowPointerUp}
+            onMouseDownCapture={(e) => {
+              // Suppress Windows/browser middle-click autoscroll UI so RF pan works.
+              if (e.button === 1) e.preventDefault()
+            }}
+            onAuxClick={(e) => {
+              if (e.button === 1) e.preventDefault()
+            }}
+            onContextMenu={(e) => {
+              // Canvas context menu deferred; for now reserve right-click and prevent pan/selection side-effects.
+              e.preventDefault()
+            }}
+          >
+            <ReactFlow
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
@@ -1717,24 +1935,101 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
           deleteKeyCode={null}
           minZoom={0.35}
           maxZoom={1.5}
+          translateExtent={translateExtent}
           proOptions={{ hideAttribution: true }}
-        >
-          <Background color="#2e3440" gap={20} size={1} />
-          <Controls className="map-flow__controls" showInteractive={false} />
-        </ReactFlow>
-        {manualChrome && multiSelectStatusParts.length > 0 ? (
-          <div className="map-flow__status-overlay" role="status" aria-live="polite">
-            <span className="muted">{multiSelectStatusParts.join(' + ')} selected</span>
+            >
+              <Background color="#2e3440" gap={20} size={1} />
+              <Panel position="top-left" className="map-flow-viewport-panel">
+                <div className="map-flow-viewport-panel__inner" role="toolbar" aria-label="Map view navigation">
+                  <button
+                    type="button"
+                    className="map-flow-viewport-panel__btn secondary"
+                    title="Fit all nodes in view"
+                    onClick={() => void handleFitAllMap()}
+                  >
+                    Fit all
+                  </button>
+                  <button
+                    type="button"
+                    className="map-flow-viewport-panel__btn secondary"
+                    title="Center on current selection (zoom unchanged)"
+                    disabled={!canCenterOnSelection}
+                    onClick={() => void handleCenterOnSelection()}
+                  >
+                    Center selection
+                  </button>
+                  <button
+                    type="button"
+                    className="map-flow-viewport-panel__btn secondary"
+                    title={`Reset zoom to ${MAP_DEFAULT_ZOOM * 100}%`}
+                    onClick={() => void handleResetZoomView()}
+                  >
+                    Reset zoom
+                  </button>
+                  <button
+                    type="button"
+                    className="map-flow-viewport-panel__btn secondary"
+                    title="Zoom in"
+                    onClick={() => void handleZoomInMap()}
+                  >
+                    Zoom in
+                  </button>
+                  <button
+                    type="button"
+                    className="map-flow-viewport-panel__btn secondary"
+                    title="Zoom out"
+                    onClick={() => void handleZoomOutMap()}
+                  >
+                    Zoom out
+                  </button>
+                </div>
+              </Panel>
+            </ReactFlow>
+            {manualChrome && multiSelectStatusParts.length > 0 ? (
+              <div className="map-flow__status-overlay" role="status" aria-live="polite">
+                <span className="muted">{multiSelectStatusParts.join(' + ')} selected</span>
+              </div>
+            ) : null}
+            {manualChrome && marqueeFlow ? (
+              <MapMarqueeOverlay
+                flowRect={normalizeFlowRect(marqueeFlow.start, marqueeFlow.current)}
+                wrapEl={flowWrapRef.current}
+                flowToScreenPosition={flowToScreenPosition}
+                viewportRev={marqueeViewportTick}
+              />
+            ) : null}
           </div>
-        ) : null}
-        {manualChrome && marqueeFlow ? (
-          <MapMarqueeOverlay
-            flowRect={normalizeFlowRect(marqueeFlow.start, marqueeFlow.current)}
-            wrapEl={flowWrapRef.current}
-            flowToScreenPosition={flowToScreenPosition}
-            viewportRev={marqueeViewportTick}
+          <div
+            className="map-view-inspector__resize-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize inspector panel"
+            onPointerDown={onInspectorResizePointerDown}
+            onPointerMove={onInspectorResizePointerMove}
+            onPointerUp={onInspectorResizePointerUp}
+            onPointerCancel={onInspectorResizePointerCancel}
+            onLostPointerCapture={onInspectorResizeLostPointerCapture}
           />
-        ) : null}
+          <aside className="map-view-inspector" aria-label="Map selection details">
+            <MapViewInspector
+              layoutMode={layoutMode}
+              mapSelection={mapSelection}
+              devices={devices}
+              savedBundle={savedBundle}
+              networkInfo={networkInfo}
+              networkId={networkId}
+              nodes={nodes}
+              actionsEnabled={manualChrome && canPersist}
+              deviceGroups={deviceGroups}
+              onSaveDevice={onSaveDevice}
+              onManualGroupAutoSize={handleManualGroupAutoSize}
+              onManualGroupAutoAlign={handleManualGroupAutoAlign}
+              onManualGroupSetLock={handleManualGroupSetLock}
+              onCommitManualGroupRename={manualChrome && canPersist ? commitGroupRename : undefined}
+              inspectorPeekDeviceId={inspectorPeekDeviceId}
+            />
+          </aside>
+        </div>
       </div>
     </div>
   )
@@ -1743,13 +2038,15 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
 export interface MapViewProps {
   devices: Device[]
   networkInfo: NetworkInfo | null
+  deviceGroups: DeviceGroup[]
+  onSaveDevice: (payload: SaveDevicePayload) => Promise<void>
 }
 
 /**
  * Map View shell: React Flow in a theme-colored canvas. Manual layout + manual groups are SQLite-scoped
  * by `networkId`. Phase 2B auto-grouping modes are computed in-memory only (`mapAutoLayout.ts`).
  */
-export function MapView({ devices, networkInfo }: MapViewProps): JSX.Element {
+export function MapView({ devices, networkInfo, deviceGroups, onSaveDevice }: MapViewProps): JSX.Element {
   const networkId = networkInfo?.networkId ?? null
   const flowKey = networkId ?? 'no-network'
 
@@ -1759,7 +2056,13 @@ export function MapView({ devices, networkInfo }: MapViewProps): JSX.Element {
         <h2>Map view</h2>
       </div>
       <ReactFlowProvider key={flowKey}>
-        <MapCanvas devices={devices} networkInfo={networkInfo} networkId={networkId} />
+        <MapCanvas
+          devices={devices}
+          networkInfo={networkInfo}
+          networkId={networkId}
+          deviceGroups={deviceGroups}
+          onSaveDevice={onSaveDevice}
+        />
       </ReactFlowProvider>
     </section>
   )

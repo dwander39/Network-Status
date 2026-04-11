@@ -790,6 +790,260 @@ tr:last-child td {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  flex: 1;
+  min-height: 0;
+}
+
+.map-view-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  flex: 1;
+  min-height: 0;
+}
+
+.map-view-workspace__toolbar {
+  flex-shrink: 0;
+}
+
+/**
+ * Row 1: banner + marquee hints align with map column only; inspector column top spacer stays empty
+ * so the inspector card aligns with the map box (row 2), not the toolbar.
+ * Columns: map | 6px resize handle | inspector (--map-inspector-inner-w, default 280px).
+ */
+.map-view-body-grid {
+  --map-inspector-inner-w: 280px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 6px var(--map-inspector-inner-w);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--space-4);
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.map-view-body-grid__gutter {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.map-view-body-grid__inspector-top-spacer {
+  grid-column: 2 / 4;
+  grid-row: 1;
+}
+
+.map-view-body-grid__map {
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+}
+
+.map-view-inspector__resize-handle {
+  grid-column: 2;
+  grid-row: 2;
+  width: 6px;
+  margin-left: calc(-1 * var(--space-4));
+  justify-self: end;
+  touch-action: none;
+  cursor: col-resize;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  position: relative;
+  z-index: 1;
+}
+
+.map-view-inspector__resize-handle:hover,
+.map-view-inspector__resize-handle:focus-visible {
+  background: var(--color-border-muted);
+}
+
+.map-view-inspector__resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 -4px;
+  width: 10px;
+}
+
+.map-view-inspector {
+  grid-column: 3;
+  grid-row: 2;
+  box-sizing: border-box;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: clamp(420px, 65vh, 880px);
+  max-height: clamp(420px, 65vh, 880px);
+}
+
+.map-inspector {
+  padding: var(--space-4);
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.map-inspector__title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+}
+
+.map-inspector__mode {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  margin: 0 0 var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border-muted);
+}
+
+.map-inspector__mode--readonly {
+  border-color: var(--color-border);
+  background: var(--color-accent-bg-soft);
+}
+
+.map-inspector__mode-name {
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-sm);
+}
+
+.map-inspector__mode-meta {
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-normal);
+}
+
+.map-inspector__empty-lead {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-md);
+}
+
+.map-inspector__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.map-inspector__field {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.map-inspector__label {
+  font-size: var(--font-size-caption);
+}
+
+.map-inspector__value {
+  font-size: var(--font-size-sm);
+  word-break: break-word;
+}
+
+.map-inspector__value-btn {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  justify-content: flex-start;
+  cursor: text;
+  word-break: break-word;
+}
+
+.map-inspector__value-btn:hover {
+  background: var(--color-surface-sunken);
+}
+
+.map-inspector__value-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: inherit;
+  font: inherit;
+}
+
+.map-inspector__value-select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: inherit;
+  font: inherit;
+}
+
+.map-inspector__value-readonly {
+  font-size: var(--font-size-sm);
+  word-break: break-word;
+}
+
+.map-inspector__save-error {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-caption);
+}
+
+.map-inspector__peek-banner {
+  margin: 0 0 var(--space-3);
+}
+
+.map-inspector__hint {
+  margin: var(--space-3) 0 0;
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-normal);
+}
+
+.map-inspector__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.map-inspector__actions .secondary {
+  width: 100%;
+  justify-content: center;
+}
+
+.map-inspector__multi-summary {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-md);
+}
+
+.map-inspector__multi-list {
+  margin: 0;
+  padding-left: var(--space-4);
+  font-size: var(--font-size-sm);
 }
 
 .map-flow {
@@ -851,6 +1105,34 @@ tr:last-child td {
 .map-flow .react-flow__node-gateway.selected {
   border-radius: var(--radius-lg);
   box-shadow: 0 0 0 2px var(--color-primary-focus-ring);
+}
+
+/* Phase 2C.4 — in-pane viewport tools (replaces default RF Controls strip). */
+.map-flow-viewport-panel {
+  margin: var(--space-3);
+  z-index: 7;
+}
+
+.map-flow-viewport-panel__inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  max-width: 10.5rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border-muted);
+  background: rgb(20 23 29 / 0.94);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow-node);
+}
+
+.map-flow-viewport-panel__btn {
+  width: 100%;
+  justify-content: center;
+  text-align: center;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-caption);
+  line-height: 1.35;
 }
 
 .map-flow__controls button {

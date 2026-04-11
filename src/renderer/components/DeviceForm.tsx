@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { prepareAppWindowForKeyboardInput } from '../utils/ensureTextFieldFocus'
 import { reportTextEntrySurfaceOpened } from '../utils/postDeleteFocusRecovery'
 import { DEVICE_TYPE_CUSTOM_MAX_LEN } from '@shared/deviceTypeDisplay'
+import { showDeviceTypeCustomField, validateDeviceFormFieldValues } from '@shared/deviceSaveValidation'
 import type { Device, DeviceGroup, SaveDevicePayload } from '@shared/types'
-import { isValidIPv4 } from '@shared/ipValidation'
 
 interface Props {
   device: Device | null
@@ -25,10 +25,7 @@ export function DeviceForm({ device, groups, prefill, onClose, onSave }: Props):
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
-  const showCustomTypeField =
-    !device ||
-    device.deviceType === 'Unknown' ||
-    Boolean(device.deviceTypeCustom?.trim())
+  const showCustomTypeField = showDeviceTypeCustomField(device)
 
   const prefillSig = prefill
     ? `${prefill.name ?? ''}\u0000${prefill.ip ?? ''}\u0000${prefill.subnet ?? ''}\u0000${prefill.gateway ?? ''}`
@@ -71,27 +68,13 @@ export function DeviceForm({ device, groups, prefill, onClose, onSave }: Props):
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault()
     setError(null)
-    if (!name.trim()) {
-      setError('Name is required.')
+    const v = validateDeviceFormFieldValues(
+      { name, ip, subnet, gateway, deviceTypeCustom },
+      showCustomTypeField
+    )
+    if (v) {
+      setError(v)
       return
-    }
-    if (!isValidIPv4(ip)) {
-      setError('IP address must be valid IPv4.')
-      return
-    }
-    if (subnet.trim() && !isValidIPv4(subnet)) {
-      setError('Subnet mask must be valid IPv4.')
-      return
-    }
-    if (gateway.trim() && !isValidIPv4(gateway)) {
-      setError('Gateway must be valid IPv4.')
-      return
-    }
-    if (showCustomTypeField) {
-      if (deviceTypeCustom.trim().length > DEVICE_TYPE_CUSTOM_MAX_LEN) {
-        setError(`Custom type must be at most ${DEVICE_TYPE_CUSTOM_MAX_LEN} characters.`)
-        return
-      }
     }
     setSaving(true)
     try {

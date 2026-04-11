@@ -351,7 +351,14 @@ export function App(): JSX.Element {
         />
       ) : (
         <Suspense fallback={<p className="muted">Loading map…</p>}>
-          <MapView devices={filtered} networkInfo={networkInfo} />
+          <MapView
+            devices={filtered}
+            networkInfo={networkInfo}
+            deviceGroups={groups}
+            onSaveDevice={async (payload) => {
+              await api.saveDevice(payload)
+            }}
+          />
         </Suspense>
       )}
 
