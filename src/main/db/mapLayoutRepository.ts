@@ -149,20 +149,23 @@ function normalizeManualGroupId(
 export function listMapLayoutForNetwork(db: Database.Database, networkId: string): MapLayoutSnapshot {
   const rows = db
     .prepare(
-      `SELECT node_key, pos_x, pos_y, manual_group_id FROM map_layout_positions WHERE network_id = @nid`
+      `SELECT node_key, pos_x, pos_y, manual_group_id, map_device_collapsed FROM map_layout_positions WHERE network_id = @nid`
     )
     .all({ nid: networkId }) as {
       node_key: string
       pos_x: number
       pos_y: number
       manual_group_id: string | null
+      map_device_collapsed: number | null
     }[]
   const out: MapLayoutSnapshot = {}
   for (const r of rows) {
+    const collapsed = Number(r.map_device_collapsed ?? 0) !== 0
     out[r.node_key] = {
       x: r.pos_x,
       y: r.pos_y,
-      manualGroupId: r.manual_group_id ?? null
+      manualGroupId: r.manual_group_id ?? null,
+      ...(collapsed ? { mapDeviceCollapsed: true } : {})
     }
   }
   return out
@@ -182,24 +185,28 @@ export function upsertMapLayoutPositions(
 ): void {
   const iso = new Date().toISOString()
   const stmt = db.prepare(
-    `INSERT INTO map_layout_positions (network_id, node_key, pos_x, pos_y, updated_at, manual_group_id)
-     VALUES (@networkId, @nodeKey, @x, @y, @updatedAt, @gid)
+    `INSERT INTO map_layout_positions (network_id, node_key, pos_x, pos_y, updated_at, manual_group_id, map_device_collapsed)
+     VALUES (@networkId, @nodeKey, @x, @y, @updatedAt, @gid, @collapsed)
      ON CONFLICT(network_id, node_key) DO UPDATE SET
        pos_x = excluded.pos_x,
        pos_y = excluded.pos_y,
        updated_at = excluded.updated_at,
-       manual_group_id = excluded.manual_group_id`
+       manual_group_id = excluded.manual_group_id,
+       map_device_collapsed = excluded.map_device_collapsed`
   )
   const run = db.transaction((items: MapLayoutPositionInput[]) => {
     for (const p of items) {
       const gid = normalizeManualGroupId(db, networkId, p.nodeKey, p.manualGroupId ?? null)
+      const collapsed =
+        p.nodeKey === MAP_LAYOUT_GATEWAY_KEY ? 0 : p.mapDeviceCollapsed ? 1 : 0
       stmt.run({
         networkId,
         nodeKey: p.nodeKey,
         x: p.x,
         y: p.y,
         updatedAt: iso,
-        gid
+        gid,
+        collapsed
       })
     }
   })

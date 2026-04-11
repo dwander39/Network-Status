@@ -295,6 +295,11 @@ export interface MapLayoutPositionInput {
   y: number
   /** Manual group membership; `null` / omit = unassigned (see `map_manual_groups`). */
   manualGroupId?: string | null
+  /**
+   * Manual layout only: compact device card on the map. Omitted/false = expanded.
+   * Gateway rows should omit or set false.
+   */
+  mapDeviceCollapsed?: boolean
 }
 
 export interface MapLayoutSavePayload {
@@ -307,7 +312,7 @@ export interface MapLayoutSavePayload {
 /** Persisted coordinates are always absolute flow space; `manualGroupId` records membership. */
 export type MapLayoutSnapshot = Record<
   string,
-  { x: number; y: number; manualGroupId?: string | null }
+  { x: number; y: number; manualGroupId?: string | null; mapDeviceCollapsed?: boolean }
 >
 
 /**

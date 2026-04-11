@@ -14,6 +14,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { Device, MapLayoutBundle, MapLayoutSavePayload, MapManualGroup, NetworkInfo } from '@shared/types'
+import type { DeviceNodeData } from './map/DeviceNode'
 import { useConfirmAction } from '../confirm/ConfirmDialogContext'
 import {
   logDeleteFlowPreDelete,
@@ -66,6 +67,35 @@ import {
 } from './map/mapLayoutGeometry'
 import type { MapLayoutCommand } from './map/mapLayoutHistory'
 
+/** Persisted manual group minimum bounds (matches Auto size floor). */
+const MANUAL_GROUP_MIN_W = 220
+const MANUAL_GROUP_MIN_H = 140
+
+export type GroupBounds = { x: number; y: number; width: number; height: number }
+
+function sameGroupBounds(a: GroupBounds, b: GroupBounds): boolean {
+  return (
+    sameXY({ x: a.x, y: a.y }, { x: b.x, y: b.y }) &&
+    Math.abs(a.width - b.width) < 0.5 &&
+    Math.abs(a.height - b.height) < 0.5
+  )
+}
+
+/** Drop invalid RF resize payloads; clamp to persisted manual-group minimums. */
+function sanitizeGroupBounds(raw: GroupBounds, minW: number, minH: number): GroupBounds | null {
+  const x = Number(raw.x)
+  const y = Number(raw.y)
+  const wIn = Number(raw.width)
+  const hIn = Number(raw.height)
+  if (![x, y, wIn, hIn].every((n) => Number.isFinite(n))) return null
+  return {
+    x,
+    y,
+    width: Math.max(minW, wIn),
+    height: Math.max(minH, hIn)
+  }
+}
+
 /** Subtle edge color: aligns with `.banner-current-profile` accent, not a new hue. */
 const MAP_EDGE_STYLE: CSSProperties = {
   stroke: '#5e81ac',
@@ -96,6 +126,13 @@ function defaultDevicePosition(index: number, total: number): XYPosition {
 /** Title/chrome band inside manual group nodes — used when auto-sizing / aligning children. */
 const GROUP_LAYOUT_CHROME_PX = 52
 
+/** Inset from group edges to device bounds after Auto size (flow coordinates, y=0 = top of group node). */
+const AUTO_SIZE_EDGE_PAD_PX = 24
+/** Matches `.map-manual-group__drag-surface` `margin-bottom` (`--space-px-4`). */
+const AUTO_SIZE_DRAG_SURFACE_MARGIN_BOTTOM_PX = 4
+/** Measured RF height can sit slightly under the painted card (border/shadow/subpixels). */
+const AUTO_SIZE_DEVICE_BOUNDS_SLOP_PX = 4
+
 function layoutDeviceMeasuredSize(n: Node): { w: number; h: number } {
   return {
     w: n.measured?.width ?? n.width ?? 180,
@@ -122,7 +159,22 @@ function collectPersistPayload(nodes: Node[], networkId: string): MapLayoutSaveP
       })
       continue
     }
-    if (n.type === 'device' || n.id === MAP_GATEWAY_NODE_ID) {
+    if (n.type === 'device') {
+      const abs = absoluteNodePosition(n, byId)
+      const parent = n.parentId ? byId.get(n.parentId) : undefined
+      const manualGroupId = parent?.type === 'manualGroup' ? parent.id : null
+      const dd = n.data as DeviceNodeData
+      const row: MapLayoutSavePayload['positions'][number] = {
+        nodeKey: n.id,
+        x: abs.x,
+        y: abs.y,
+        manualGroupId
+      }
+      if (dd.mapManualLayout && dd.mapDeviceCollapsed) row.mapDeviceCollapsed = true
+      positions.push(row)
+      continue
+    }
+    if (n.type === 'gateway' || n.id === MAP_GATEWAY_NODE_ID) {
       const abs = absoluteNodePosition(n, byId)
       const parent = n.parentId ? byId.get(n.parentId) : undefined
       const manualGroupId = parent?.type === 'manualGroup' ? parent.id : null
@@ -142,7 +194,14 @@ function mergeDeviceGatewayPositionsIntoBundle(bundle: MapLayoutBundle, nodes: N
     const abs = absoluteNodePosition(n, byId)
     const parent = n.parentId ? byId.get(n.parentId) : undefined
     const manualGroupId = parent?.type === 'manualGroup' ? parent.id : null
-    positions[n.id] = { x: abs.x, y: abs.y, manualGroupId }
+    if (n.type === 'device') {
+      const dd = n.data as DeviceNodeData
+      const entry: (typeof positions)[string] = { x: abs.x, y: abs.y, manualGroupId }
+      if (dd.mapManualLayout && dd.mapDeviceCollapsed) entry.mapDeviceCollapsed = true
+      positions[n.id] = entry
+    } else {
+      positions[n.id] = { x: abs.x, y: abs.y, manualGroupId }
+    }
   }
   return { ...bundle, positions }
 }
@@ -150,9 +209,36 @@ function mergeDeviceGatewayPositionsIntoBundle(bundle: MapLayoutBundle, nodes: N
 interface GroupHandlers {
   commitRename: (id: string, name: string) => void
   deleteGroup: (id: string) => void
+  onResizeSessionStart: (id: string) => void
+  onResizeLive: (id: string, bounds: GroupBounds) => void
+  onResizeSessionEnd: (id: string, bounds: GroupBounds) => void
+}
+
+interface DeviceLayoutHandlers {
+  toggleCollapsed: (id: string) => void
+}
+
+function manualGroupBaseData(g: MapManualGroup, handlers: GroupHandlers) {
+  return {
+    name: g.name,
+    width: g.width,
+    height: g.height,
+    contentsLocked: g.contentsLocked,
+    onCommitRename: (nextName: string) => handlers.commitRename(g.id, nextName),
+    onDelete: () => handlers.deleteGroup(g.id)
+  }
 }
 
 function manualGroupFlowNodeFromRow(g: MapManualGroup, handlers: GroupHandlers): Node {
+  const base = manualGroupBaseData(g, handlers)
+  const data = g.contentsLocked
+    ? base
+    : {
+        ...base,
+        onResizeSessionStart: () => handlers.onResizeSessionStart(g.id),
+        onResizeLive: (b: GroupBounds) => handlers.onResizeLive(g.id, b),
+        onResizeSessionEnd: (b: GroupBounds) => handlers.onResizeSessionEnd(g.id, b)
+      }
   return {
     id: g.id,
     type: 'manualGroup',
@@ -160,14 +246,7 @@ function manualGroupFlowNodeFromRow(g: MapManualGroup, handlers: GroupHandlers):
     zIndex: 0,
     style: { width: g.width, height: g.height },
     dragHandle: '.map-manual-group__drag-surface',
-    data: {
-      name: g.name,
-      width: g.width,
-      height: g.height,
-      contentsLocked: g.contentsLocked,
-      onCommitRename: (nextName: string) => handlers.commitRename(g.id, nextName),
-      onDelete: () => handlers.deleteGroup(g.id)
-    },
+    data,
     draggable: true,
     selectable: true
   }
@@ -188,7 +267,8 @@ function buildMapNodes(
   devices: Device[],
   bundle: MapLayoutBundle,
   gatewayIp: string | null,
-  handlers: GroupHandlers
+  handlers: GroupHandlers,
+  deviceHandlers: DeviceLayoutHandlers
 ): Node[] {
   const prevById = new Map(prev.map((n) => [n.id, n]))
   const prevPos = new Map(prev.map((n) => [n.id, n.position]))
@@ -209,24 +289,28 @@ function buildMapNodes(
     selectable: true
   }
 
-  const groupNodes: Node[] = bundle.manualGroups.map((g) => ({
-    id: g.id,
-    type: 'manualGroup',
-    position: prevById.get(g.id)?.position ?? { x: g.x, y: g.y },
-    zIndex: 0,
-    style: { width: g.width, height: g.height },
-    dragHandle: '.map-manual-group__drag-surface',
-    data: {
-      name: g.name,
-      width: g.width,
-      height: g.height,
-      contentsLocked: g.contentsLocked,
-      onCommitRename: (nextName: string) => handlers.commitRename(g.id, nextName),
-      onDelete: () => handlers.deleteGroup(g.id)
-    },
-    draggable: true,
-    selectable: true
-  }))
+  const groupNodes: Node[] = bundle.manualGroups.map((g) => {
+    const base = manualGroupBaseData(g, handlers)
+    const data = g.contentsLocked
+      ? base
+      : {
+          ...base,
+          onResizeSessionStart: () => handlers.onResizeSessionStart(g.id),
+          onResizeLive: (b: GroupBounds) => handlers.onResizeLive(g.id, b),
+          onResizeSessionEnd: (b: GroupBounds) => handlers.onResizeSessionEnd(g.id, b)
+        }
+    return {
+      id: g.id,
+      type: 'manualGroup',
+      position: prevById.get(g.id)?.position ?? { x: g.x, y: g.y },
+      zIndex: 0,
+      style: { width: g.width, height: g.height },
+      dragHandle: '.map-manual-group__drag-surface',
+      data,
+      draggable: true,
+      selectable: true
+    }
+  })
 
   const deviceNodes: Node[] = []
   devices.forEach((d, idx) => {
@@ -254,6 +338,18 @@ function buildMapNodes(
       targetParent = recParent ?? prevManualParent
     }
 
+    const prevDev = prevNode?.type === 'device' ? (prevNode.data as DeviceNodeData) : undefined
+    const mapDeviceCollapsed =
+      prevDev?.mapDeviceCollapsed !== undefined
+        ? prevDev.mapDeviceCollapsed
+        : Boolean(rec?.mapDeviceCollapsed)
+    const deviceData: DeviceNodeData = {
+      device: d,
+      mapManualLayout: true,
+      mapDeviceCollapsed,
+      onToggleMapDeviceCollapsed: () => deviceHandlers.toggleCollapsed(d.id)
+    }
+
     if (targetParent) {
       const g = groupMap.get(targetParent)!
       const lockedChild = Boolean(g.contentsLocked)
@@ -271,7 +367,7 @@ function buildMapNodes(
         parentId: targetParent,
         position: pos,
         zIndex: 2,
-        data: { device: d },
+        data: deviceData,
         draggable: !lockedChild,
         selectable: true
       })
@@ -289,7 +385,7 @@ function buildMapNodes(
         type: 'device',
         position: pos,
         zIndex: 2,
-        data: { device: d },
+        data: deviceData,
         draggable: true,
         selectable: true
       })
@@ -366,6 +462,14 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const [savedBundle, setSavedBundle] = useState<MapLayoutBundle>({ manualGroups: [], positions: {} })
   const [layoutMode, setLayoutMode] = useState<MapLayoutMode>('manual')
+  /**
+   * Bumped only when the map graph is fully replaced via `buildMapNodes` / `buildAutoLayoutNodes` (bundle,
+   * devices, or mode). Drives selection→`node.selected` sync **without** listing `nodes` in effect deps.
+   * Listing `nodes` caused "Maximum update depth exceeded": any resize/dimension update changed `nodes` →
+   * selection `useLayoutEffect` → `setNodesState` → React Flow `StoreUpdater` → `onNodesChange` → `nodes`
+   * again → repeat until the renderer died.
+   */
+  const [mapGraphRebuildTick, setMapGraphRebuildTick] = useState(0)
   /** After auto modes, rebuild manual nodes from DB snapshot instead of merging auto positions. */
   const prevLayoutModeRef = useRef<MapLayoutMode>('manual')
   /** Debounced persist must read latest mode when the timer fires (avoid saving after switching to auto). */
@@ -490,19 +594,27 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
           const { w, h } = layoutDeviceMeasuredSize(m)
           const x0 = m.position.x
           const y0 = m.position.y
-          const x1 = x0 + w
-          const y1 = y0 + h
+          const x1 = x0 + Math.ceil(w)
+          const y1 = y0 + Math.ceil(h)
           minX = Math.min(minX, x0)
           minY = Math.min(minY, y0)
           maxX = Math.max(maxX, x1)
           maxY = Math.max(maxY, y1)
         }
       }
-      const pad = 24
-      const minW = 220
-      const minH = 140
-      const newW = Math.max(minW, maxX - minX + pad * 2)
-      const newH = Math.max(minH, maxY - minY + pad * 2)
+      const minW = MANUAL_GROUP_MIN_W
+      const minH = MANUAL_GROUP_MIN_H
+      /*
+       * Height must span from y=0 (group top) to below the lowest device. Using (maxY - minY + 2*pad) is wrong:
+       * that is only the padded *cluster* height; when minY > 0 it can be < maxY and clips the bottom.
+       */
+      const newW = Math.max(minW, Math.ceil(maxX + AUTO_SIZE_EDGE_PAD_PX))
+      const newH = Math.max(
+        minH,
+        Math.ceil(
+          maxY + AUTO_SIZE_EDGE_PAD_PX + AUTO_SIZE_DRAG_SURFACE_MARGIN_BOTTOM_PX + AUTO_SIZE_DEVICE_BOUNDS_SLOP_PX
+        )
+      )
       const next = nds.map((n) => {
         if (n.id !== groupId || n.type !== 'manualGroup') return n
         const style = { ...(n.style as CSSProperties), width: newW, height: newH }
@@ -733,46 +845,6 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     ]
   )
 
-  const groupHandlers = useRef<GroupHandlers>({
-    commitRename: commitGroupRename,
-    deleteGroup: handleDeleteGroup
-  })
-  groupHandlers.current = { commitRename: commitGroupRename, deleteGroup: handleDeleteGroup }
-
-  useEffect(() => {
-    const gw = networkInfo?.gateway ?? null
-    const prevMode = prevLayoutModeRef.current
-    if (layoutMode !== 'manual') {
-      setNodesState(buildAutoLayoutNodes(devices, layoutMode, gw))
-      setEdges(buildEdges(devices))
-      prevLayoutModeRef.current = layoutMode
-      return
-    }
-    const reseedFromSaved = prevMode !== 'manual'
-    setNodesState((prev) =>
-      buildMapNodes(reseedFromSaved ? [] : prev, devices, savedBundle, gw, groupHandlers.current)
-    )
-    setEdges(buildEdges(devices))
-    prevLayoutModeRef.current = layoutMode
-  }, [devices, layoutMode, savedBundle, networkInfo?.gateway, setEdges, setNodesState])
-
-  useEffect(() => {
-    if (layoutMode === 'manual') return
-    const id = requestAnimationFrame(() => {
-      void fitView({ padding: 0.14, duration: 220 })
-    })
-    return () => cancelAnimationFrame(id)
-  }, [devices.length, fitView, layoutMode])
-
-  useEffect(() => {
-    if (nodes.length === 0 || didInitialFit.current) return
-    didInitialFit.current = true
-    const id = requestAnimationFrame(() => {
-      fitView({ padding: 0.18, duration: 200 })
-    })
-    return () => cancelAnimationFrame(id)
-  }, [nodes.length, fitView])
-
   const schedulePersist = useCallback(() => {
     if (layoutMode !== 'manual') return
     const nid = networkId?.trim()
@@ -801,6 +873,224 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       if (persistTimer.current) clearTimeout(persistTimer.current)
     }
   }, [])
+
+  const groupResizeStartRef = useRef<{ id: string; bounds: GroupBounds } | null>(null)
+
+  /**
+   * Live resize only: update RF nodes. Must NOT touch `savedBundle` — that triggers the manual-map
+   * `useEffect` and full `buildMapNodes`, which rebuilds the graph every frame and can blank the renderer.
+   */
+  const applyManualGroupBoundsLive = useCallback(
+    (id: string, p: GroupBounds) => {
+      setNodesState((ns) => {
+        const cur = ns.find((n) => n.id === id && n.type === 'manualGroup')
+        if (!cur) return ns
+        const prevData = cur.data as { width: number; height: number }
+        if (
+          Math.abs(cur.position.x - p.x) < 0.01 &&
+          Math.abs(cur.position.y - p.y) < 0.01 &&
+          Math.abs(prevData.width - p.width) < 0.01 &&
+          Math.abs(prevData.height - p.height) < 0.01
+        ) {
+          return ns
+        }
+        return ns.map((n) => {
+          if (n.id !== id || n.type !== 'manualGroup') return n
+          const data = n.data as Record<string, unknown>
+          return {
+            ...n,
+            position: { x: p.x, y: p.y },
+            style: { ...(n.style as CSSProperties), width: p.width, height: p.height },
+            data: { ...data, width: p.width, height: p.height }
+          }
+        })
+      })
+    },
+    [setNodesState]
+  )
+
+  /** Persisted mirror + nodes (resize end, undo, redo). */
+  const commitManualGroupBounds = useCallback(
+    (id: string, p: GroupBounds) => {
+      setNodesState((ns) =>
+        ns.map((n) => {
+          if (n.id !== id || n.type !== 'manualGroup') return n
+          const data = n.data as Record<string, unknown>
+          return {
+            ...n,
+            position: { x: p.x, y: p.y },
+            style: { ...(n.style as CSSProperties), width: p.width, height: p.height },
+            data: { ...data, width: p.width, height: p.height }
+          }
+        })
+      )
+      setSavedBundle((b) => ({
+        ...b,
+        manualGroups: b.manualGroups.map((g) =>
+          g.id === id ? { ...g, x: p.x, y: p.y, width: p.width, height: p.height } : g
+        )
+      }))
+    },
+    [setNodesState, setSavedBundle]
+  )
+
+  const onGroupResizeSessionStart = useCallback(
+    (id: string) => {
+      const n = getNodes().find((x) => x.id === id && x.type === 'manualGroup')
+      if (!n) return
+      if (Boolean((n.data as { contentsLocked?: boolean }).contentsLocked)) return
+      const d = n.data as { width: number; height: number }
+      const snap = sanitizeGroupBounds(
+        { x: n.position.x, y: n.position.y, width: d.width, height: d.height },
+        MANUAL_GROUP_MIN_W,
+        MANUAL_GROUP_MIN_H
+      )
+      if (!snap) return
+      groupResizeStartRef.current = { id, bounds: snap }
+    },
+    [getNodes]
+  )
+
+  const onGroupResizeLive = useCallback(
+    (id: string, raw: GroupBounds) => {
+      const p = sanitizeGroupBounds(raw, MANUAL_GROUP_MIN_W, MANUAL_GROUP_MIN_H)
+      if (!p) return
+      applyManualGroupBoundsLive(id, p)
+    },
+    [applyManualGroupBoundsLive]
+  )
+
+  const onGroupResizeSessionEnd = useCallback(
+    (id: string, raw: GroupBounds) => {
+      const n = getNodes().find((x) => x.id === id && x.type === 'manualGroup')
+      if (!n || Boolean((n.data as { contentsLocked?: boolean }).contentsLocked)) {
+        groupResizeStartRef.current = null
+        return
+      }
+      const p = sanitizeGroupBounds(raw, MANUAL_GROUP_MIN_W, MANUAL_GROUP_MIN_H)
+      const start = groupResizeStartRef.current
+      groupResizeStartRef.current = null
+      if (!p) return
+      commitManualGroupBounds(id, p)
+      schedulePersist()
+      if (!start || start.id !== id || sameGroupBounds(start.bounds, p)) return
+      pushMapHistory({
+        type: 'resizeManualGroup',
+        undo: () => commitManualGroupBounds(id, start.bounds),
+        redo: () => commitManualGroupBounds(id, p)
+      })
+    },
+    [commitManualGroupBounds, getNodes, pushMapHistory, schedulePersist]
+  )
+
+  const deviceLayoutHandlersRef = useRef<DeviceLayoutHandlers>({
+    toggleCollapsed: () => {}
+  })
+
+  const toggleDeviceCollapsed = useCallback((id: string) => {
+    setNodesState((ns) => {
+      const next = ns.map((n) => {
+        if (n.id !== id || n.type !== 'device') return n
+        const dd = n.data as DeviceNodeData
+        if (!dd.mapManualLayout) return n
+        return {
+          ...n,
+          data: { ...dd, mapDeviceCollapsed: !dd.mapDeviceCollapsed }
+        }
+      })
+      setSavedBundle((b) => mergeDeviceGatewayPositionsIntoBundle(b, next))
+      queueMicrotask(() => schedulePersistRef.current())
+      return next
+    })
+  }, [])
+
+  const handleCollapseAllDevices = useCallback(() => {
+    setNodesState((ns) => {
+      const next = ns.map((n) => {
+        if (n.type !== 'device') return n
+        const dd = n.data as DeviceNodeData
+        if (!dd.mapManualLayout) return n
+        return { ...n, data: { ...dd, mapDeviceCollapsed: true } }
+      })
+      setSavedBundle((b) => mergeDeviceGatewayPositionsIntoBundle(b, next))
+      queueMicrotask(() => schedulePersistRef.current())
+      return next
+    })
+  }, [])
+
+  const handleExpandAllDevices = useCallback(() => {
+    setNodesState((ns) => {
+      const next = ns.map((n) => {
+        if (n.type !== 'device') return n
+        const dd = n.data as DeviceNodeData
+        if (!dd.mapManualLayout) return n
+        return { ...n, data: { ...dd, mapDeviceCollapsed: false } }
+      })
+      setSavedBundle((b) => mergeDeviceGatewayPositionsIntoBundle(b, next))
+      queueMicrotask(() => schedulePersistRef.current())
+      return next
+    })
+  }, [])
+
+  deviceLayoutHandlersRef.current = { toggleCollapsed: toggleDeviceCollapsed }
+
+  const groupHandlers = useRef<GroupHandlers>({
+    commitRename: commitGroupRename,
+    deleteGroup: handleDeleteGroup,
+    onResizeSessionStart: () => {},
+    onResizeLive: () => {},
+    onResizeSessionEnd: () => {}
+  })
+  groupHandlers.current = {
+    commitRename: commitGroupRename,
+    deleteGroup: handleDeleteGroup,
+    onResizeSessionStart: onGroupResizeSessionStart,
+    onResizeLive: onGroupResizeLive,
+    onResizeSessionEnd: onGroupResizeSessionEnd
+  }
+
+  useEffect(() => {
+    const gw = networkInfo?.gateway ?? null
+    const prevMode = prevLayoutModeRef.current
+    if (layoutMode !== 'manual') {
+      setNodesState(buildAutoLayoutNodes(devices, layoutMode, gw))
+      setMapGraphRebuildTick((t) => t + 1)
+      setEdges(buildEdges(devices))
+      prevLayoutModeRef.current = layoutMode
+      return
+    }
+    const reseedFromSaved = prevMode !== 'manual'
+    setNodesState((prev) =>
+      buildMapNodes(
+        reseedFromSaved ? [] : prev,
+        devices,
+        savedBundle,
+        gw,
+        groupHandlers.current,
+        deviceLayoutHandlersRef.current
+      )
+    )
+    setMapGraphRebuildTick((t) => t + 1)
+    setEdges(buildEdges(devices))
+    prevLayoutModeRef.current = layoutMode
+  }, [devices, layoutMode, savedBundle, networkInfo?.gateway, setEdges, setNodesState])
+
+  useEffect(() => {
+    if (layoutMode === 'manual') return
+    const id = requestAnimationFrame(() => {
+      void fitView({ padding: 0.14, duration: 220 })
+    })
+    return () => cancelAnimationFrame(id)
+  }, [devices.length, fitView, layoutMode])
+
+  useEffect(() => {
+    if (nodes.length === 0 || didInitialFit.current) return
+    didInitialFit.current = true
+    const id = requestAnimationFrame(() => {
+      fitView({ padding: 0.18, duration: 200 })
+    })
+    return () => cancelAnimationFrame(id)
+  }, [nodes.length, fitView])
 
   useEffect(() => {
     clearMapHistory()
@@ -851,7 +1141,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
       })
       return changed ? next : nds
     })
-  }, [layoutMode, mapSelection, nodes, setNodesState])
+  }, [layoutMode, mapSelection, mapGraphRebuildTick, setNodesState])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1180,7 +1470,17 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     setMapSelection(clearSelection())
     setSavedBundle({ manualGroups: [], positions: {} })
     const gw = networkInfo?.gateway ?? null
-    setNodesState(buildMapNodes([], devices, { manualGroups: [], positions: {} }, gw, groupHandlers.current))
+    setNodesState(
+      buildMapNodes(
+        [],
+        devices,
+        { manualGroups: [], positions: {} },
+        gw,
+        groupHandlers.current,
+        deviceLayoutHandlersRef.current
+      )
+    )
+    setMapGraphRebuildTick((t) => t + 1)
     setEdges(buildEdges(devices))
     window.setTimeout(() => fitView({ padding: 0.2, duration: 200 }), 60)
   }, [
@@ -1192,6 +1492,7 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
     networkId,
     networkInfo?.gateway,
     setEdges,
+    setMapGraphRebuildTick,
     setMapSelection,
     setNodesState
   ])
@@ -1309,6 +1610,24 @@ function MapCanvas({ devices, networkInfo, networkId }: MapCanvasProps): JSX.Ele
           title={!manualChrome ? 'Redo is only available in Manual layout' : 'Redo (Ctrl+Shift+Z or Ctrl+Y)'}
         >
           Redo
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={handleCollapseAllDevices}
+          disabled={!manualChrome}
+          title={!manualChrome ? 'Switch to Manual layout to collapse device cards' : 'Collapse all device cards on the map'}
+        >
+          Collapse all
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={handleExpandAllDevices}
+          disabled={!manualChrome}
+          title={!manualChrome ? 'Switch to Manual layout to expand device cards' : 'Expand all device cards on the map'}
+        >
+          Expand all
         </button>
         <button
           type="button"

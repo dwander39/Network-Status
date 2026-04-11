@@ -872,6 +872,7 @@ tr:last-child td {
 
 .map-device-node,
 .map-gateway-node {
+  position: relative;
   min-width: 140px;
   max-width: 220px;
   padding: var(--space-3) var(--space-4);
@@ -884,6 +885,92 @@ tr:last-child td {
   transition:
     border-color var(--duration-fast) var(--ease-standard),
     background-color var(--duration-fast) var(--ease-standard);
+}
+
+/* Room for corner icon control without overlapping the title row */
+.map-device-node--manual-expanded {
+  padding-right: calc(var(--space-2) + 1.35rem);
+}
+
+.map-device-node--collapsed {
+  min-width: 0;
+  max-width: 320px;
+  padding: var(--space-1) var(--space-2);
+}
+
+.map-device-node__collapsed-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 1.35rem;
+}
+
+.map-device-node__collapsed-dot {
+  flex-shrink: 0;
+}
+
+.map-device-node__name--collapsed {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.map-device-node__density-btn {
+  box-sizing: border-box;
+  margin: 0;
+  color: var(--color-text-muted);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+
+.map-device-node__density-btn--corner {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  z-index: 2;
+  width: 1.35rem;
+  height: 1.35rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.55rem;
+  line-height: 1;
+}
+
+.map-device-node__density-btn--row-end {
+  flex-shrink: 0;
+  width: 1.35rem;
+  height: 1.35rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.55rem;
+  line-height: 1;
+  margin-left: auto;
+}
+
+.map-device-node__density-btn:hover {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+  background: var(--color-hover-faint);
+}
+
+.map-device-node__density-btn:focus-visible {
+  outline: 2px solid var(--color-primary-focus-ring);
+  outline-offset: 1px;
 }
 
 .map-device-node:hover:not(.map-device-node--selected) {
@@ -1270,6 +1357,28 @@ tr:last-child td {
   font-size: var(--font-size-xs);
   padding: 0.2rem 0.4rem;
   line-height: 1.2;
+}
+
+/* NodeResizer (manual groups): match map accent, stay readable on dark canvas */
+.map-manual-group .map-manual-group__resize-handle {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-raised);
+}
+
+.map-manual-group--selected .map-manual-group__resize-handle {
+  border-color: var(--color-accent-border);
+  background: var(--color-accent-bg-soft);
+}
+
+.map-manual-group .map-manual-group__resize-line {
+  border-color: var(--color-border-strong);
+}
+
+.map-manual-group--selected .map-manual-group__resize-line {
+  border-color: var(--color-accent-border);
 }
 
 .u-minw-220 {

@@ -417,6 +417,13 @@ function migrateMapManualGroupsSchema(database: Database.Database): void {
   if (!gcols.some((c) => c.name === 'contents_locked')) {
     database.exec(`ALTER TABLE map_manual_groups ADD COLUMN contents_locked INTEGER NOT NULL DEFAULT 1`)
   }
+
+  const lcols = database.prepare(`PRAGMA table_info(map_layout_positions)`).all() as { name: string }[]
+  if (!lcols.some((c) => c.name === 'map_device_collapsed')) {
+    database.exec(
+      `ALTER TABLE map_layout_positions ADD COLUMN map_device_collapsed INTEGER NOT NULL DEFAULT 0`
+    )
+  }
 }
 
 function migrateAlertRulesSchema(database: Database.Database): void {
