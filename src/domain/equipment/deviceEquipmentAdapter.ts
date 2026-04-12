@@ -7,8 +7,8 @@
  * Absence / unknown / not-yet-discovered: use `{ type: 'json', value: null }` consistently — not
  * empty strings (which would conflate “missing” with “user cleared to empty” once resolvers exist).
  *
- * Future: persist `values` (JSON column or side table), split system vs user vs override, and
- * stop duplicating columns in the projection (read from `values` only).
+ * `devices.equipment_values_json` mirrors this projection (write-through from authoritative columns);
+ * it includes join-derived `groupName` as in runtime `Device`. Reads still use columns + `rowToDevice`.
  */
 
 import type { Device, DeviceStatus, DeviceType } from '@shared/types'

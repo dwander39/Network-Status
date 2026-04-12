@@ -227,3 +227,36 @@ export function persistDeviceDiscoveryFieldsById(
     )
     .run(macAddress, vendor, deviceType, deviceId).changes
 }
+
+/**
+ * Write-through mirror only: persists JSON for `mapDeviceToEquipmentRuntime(device).values`.
+ * Columns remain source of truth; call only from `equipmentMutationService` after a reload-backed `Device`.
+ */
+export function persistEquipmentValuesJsonMirror(
+  db: Database.Database,
+  deviceId: string,
+  equipmentValuesJson: string
+): number {
+  return db
+    .prepare(`UPDATE devices SET equipment_values_json = ? WHERE id = ?`)
+    .run(equipmentValuesJson, deviceId).changes
+}
+
+/**
+ * Device ids that match the same scope as {@link persistAllDevicesMonitoringStatus} (for mirror refresh).
+ * Must stay predicate-identical to avoid stale JSON after bulk monitoring updates.
+ */
+export function listDeviceIdsInMonitoringBulkScope(
+  db: Database.Database,
+  networkId?: string | null
+): string[] {
+  const nid = networkId !== undefined ? networkId : getStableNetworkId()
+  if (nid == null) {
+    const rows = db.prepare(`SELECT id FROM devices`).all() as { id: string }[]
+    return rows.map((r) => String(r.id))
+  }
+  const rows = db
+    .prepare(`SELECT id FROM devices WHERE network_id IS NULL OR network_id = ?`)
+    .all(nid) as { id: string }[]
+  return rows.map((r) => String(r.id))
+}

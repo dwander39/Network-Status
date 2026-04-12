@@ -64,6 +64,7 @@ export function getDatabase(): Database.Database {
   migrateMapLayoutSchema(db)
   migrateMapManualGroupsSchema(db)
   migrateDeviceTypeCustomSchema(db)
+  migrateEquipmentValuesMirrorColumn(db)
   migrateEventLogsSchema(db)
   migrateCanonicalizeNetworkIds(db)
   seedDefaultSettings(db)
@@ -369,6 +370,14 @@ function migrateDeviceTypeCustomSchema(database: Database.Database): void {
   const cols = database.prepare(`PRAGMA table_info(devices)`).all() as { name: string }[]
   if (!cols.some((c) => c.name === 'device_type_custom')) {
     database.exec(`ALTER TABLE devices ADD COLUMN device_type_custom TEXT`)
+  }
+}
+
+/** Nullable JSON mirror of `mapDeviceToEquipmentRuntime(device).values`; legacy columns stay authoritative. */
+function migrateEquipmentValuesMirrorColumn(database: Database.Database): void {
+  const cols = database.prepare(`PRAGMA table_info(devices)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'equipment_values_json')) {
+    database.exec(`ALTER TABLE devices ADD COLUMN equipment_values_json TEXT`)
   }
 }
 

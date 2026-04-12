@@ -24,6 +24,7 @@ import {
   allocateDeviceId,
   getDeviceById,
   getDeviceByIp,
+  listDeviceIdsInMonitoringBulkScope,
   persistAllDevicesMonitoringStatus,
   persistDeleteAllDevices,
   persistDeleteDeviceById,
@@ -31,6 +32,7 @@ import {
   persistDeviceDiscoveryFieldsById,
   persistDeviceGroupId,
   persistDeviceMonitoringStatus,
+  persistEquipmentValuesJsonMirror,
   persistNormalizedDevice
 } from '../db/deviceRepository'
 import { getDeviceGroupById } from '../db/groupRepository'
@@ -79,6 +81,37 @@ function withEquipmentRuntime<T extends LegacyEquipmentMutationResult>(r: T): T 
     return { ...r, equipmentRuntime: mapDeviceToEquipmentRuntime(r.device) }
   }
   return r
+}
+
+/** JSON envelope for `equipment_values_json`; version allows future shape changes without guessing. */
+const EQUIPMENT_VALUES_MIRROR_VERSION = 1 as const
+
+/**
+ * Write-through mirror: serializes `mapDeviceToEquipmentRuntime(device).values` into `devices.equipment_values_json`.
+ * Invoke only after a successful column write, passing a `Device` from {@link getDeviceById} so the mirror matches
+ * `rowToDevice` truth (join-derived `groupName`, vendor lookup, etc.). Legacy columns remain authoritative; reads
+ * still use columns — this column is storage for later experiments only.
+ */
+function syncEquipmentValuesMirror(db: Database.Database, device: Device): void {
+  const { values } = mapDeviceToEquipmentRuntime(device)
+  const payload = { v: EQUIPMENT_VALUES_MIRROR_VERSION, values }
+  persistEquipmentValuesJsonMirror(db, device.id, JSON.stringify(payload))
+}
+
+/**
+ * After {@link persistAllDevicesMonitoringStatus}: same scope as that UPDATE, reload each device and refresh mirror.
+ */
+function syncEquipmentValuesMirrorForMonitoringScope(
+  db: Database.Database,
+  _status: DeviceStatus,
+  _lastCheckedIso: string,
+  networkId?: string | null
+): void {
+  const ids = listDeviceIdsInMonitoringBulkScope(db, networkId)
+  for (const id of ids) {
+    const d = getDeviceById(db, id)
+    if (d) syncEquipmentValuesMirror(db, d)
+  }
 }
 
 function networkScopeForPersist(): string | null {
@@ -284,6 +317,7 @@ export function mutateDeviceFromSavePayload(
     })
 
     const next = getDeviceById(db, existing!.id)!
+    syncEquipmentValuesMirror(db, next)
     return withEquipmentRuntime({
       success: true,
       source,
@@ -330,6 +364,7 @@ export function mutateDeviceFromSavePayload(
   })
 
   const next = getDeviceById(db, id)!
+  syncEquipmentValuesMirror(db, next)
   return withEquipmentRuntime({
     success: true,
     source,
@@ -419,6 +454,7 @@ export function mutateDeviceGroupAssignment(
     })
   }
 
+  syncEquipmentValuesMirror(db, next)
   return withEquipmentRuntime({
     success: true,
     source,
@@ -561,6 +597,11 @@ export function mutateMonitoringDeviceStatus(
   }
 
   const rowsChanged = persistDeviceMonitoringStatus(db, deviceId, status, isoNorm.iso)
+  const after = getDeviceById(db, deviceId)
+  if (after) {
+    syncEquipmentValuesMirror(db, after)
+  }
+
   const appliedPatches: AppliedEquipmentPatch[] = [
     {
       fieldKey: 'last_status',
@@ -647,6 +688,13 @@ export function mutateMonitoringBulkStatus(
   const resolvedScope =
     networkId !== undefined ? networkId : getStableNetworkId()
   const rowsChanged = persistAllDevicesMonitoringStatus(
+    db,
+    status,
+    isoNorm.iso,
+    networkId !== undefined ? networkId : undefined
+  )
+
+  syncEquipmentValuesMirrorForMonitoringScope(
     db,
     status,
     isoNorm.iso,
@@ -809,6 +857,11 @@ export function mutateDiscoveryDeviceFromArpRow(
     inferredType
   )
 
+  const afterDiscovery = getDeviceById(db, resolved.id)
+  if (afterDiscovery) {
+    syncEquipmentValuesMirror(db, afterDiscovery)
+  }
+
   const nextVendor = input.arpVendor != null ? input.arpVendor : prevVendor
   const appliedPatches: AppliedEquipmentPatch[] = [
     {
@@ -859,6 +912,10 @@ export function applyDiscoverySyncFromArpRow(db: Database.Database, input: Disco
 }
 
 // --- Lifecycle / hard delete (orchestration; persistence is persistDelete* in repository) ---
+//
+// No syncEquipmentValuesMirror on deletes: the `devices` row (and any future JSON mirror column) is
+// removed with the row; nothing to refresh. Tombstones are out of scope until persistence design requires them.
+//
 
 /** Who authorized the destructive lifecycle operation (UI vs automated/system maintenance). */
 export type EquipmentLifecycleSource = 'user' | 'system'
