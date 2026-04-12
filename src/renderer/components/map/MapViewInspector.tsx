@@ -2,13 +2,16 @@ import type { ReactNode } from 'react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Node } from '@xyflow/react'
 import type { Device, DeviceGroup, MapLayoutBundle, NetworkInfo, SaveDevicePayload } from '@shared/types'
-import { DEVICE_TYPE_CUSTOM_MAX_LEN, getDeviceTypeDisplayLabel } from '@shared/deviceTypeDisplay'
+import { DEVICE_TYPE_CUSTOM_MAX_LEN } from '@shared/deviceTypeDisplay'
 import {
   showDeviceTypeCustomField,
   validateDeviceFormFieldValues,
   type DeviceFormFieldValues
 } from '@shared/deviceSaveValidation'
-import { resolveMapInspectorStaticReadModel } from '../../equipment/equipmentReadDisplay'
+import {
+  mapInspectorStaticLabelFromLegacyDefinition,
+  resolveMapInspectorStaticReadModel
+} from '../../equipment/equipmentReadDisplay'
 import type { MapAutoGroupMode } from './mapAutoLayout'
 import {
   mapSelectionDeviceCount,
@@ -380,22 +383,26 @@ function StaticDeviceInspectorRows({
   manualGroupName: string | null
 }): JSX.Element {
   const staticRead = resolveMapInspectorStaticReadModel(d)
+  const f = staticRead.fields
+  const lbl = mapInspectorStaticLabelFromLegacyDefinition
   return (
     <>
-      <InspectorField label="Name">{staticRead.name}</InspectorField>
-      <InspectorField label="IP">{staticRead.ip}</InspectorField>
-      <InspectorField label="MAC address">{staticRead.macAddress}</InspectorField>
-      <InspectorField label="Subnet">{staticRead.subnet}</InspectorField>
-      <InspectorField label="Gateway">{staticRead.gateway}</InspectorField>
-      <InspectorField label="Group">{staticRead.groupDisplay}</InspectorField>
-      <InspectorField label="Group ID">{staticRead.groupId}</InspectorField>
-      <InspectorField label="Type">{staticRead.typeDisplay}</InspectorField>
-      {staticRead.customTypeRowVisible ? (
-        <InspectorField label="Custom type">{staticRead.customTypeDisplay}</InspectorField>
+      <InspectorField label={lbl('name', 'Name')}>{f.name.displayValue}</InspectorField>
+      <InspectorField label={lbl('ip', 'IP')}>{f.ip.displayValue}</InspectorField>
+      <InspectorField label={lbl('macAddress', 'MAC address')}>{f.macAddress.displayValue}</InspectorField>
+      <InspectorField label={lbl('subnet', 'Subnet')}>{f.subnet.displayValue}</InspectorField>
+      <InspectorField label={lbl('gateway', 'Gateway')}>{f.gateway.displayValue}</InspectorField>
+      <InspectorField label={lbl('groupName', 'Group')}>{f.groupName.displayValue}</InspectorField>
+      <InspectorField label={lbl('groupId', 'Group ID')}>{f.groupId.displayValue}</InspectorField>
+      <InspectorField label={lbl('deviceType', 'Type')}>{f.deviceType.displayValue}</InspectorField>
+      {f.deviceTypeCustom.isVisible ? (
+        <InspectorField label={lbl('deviceTypeCustom', 'Custom type')}>
+          {f.deviceTypeCustom.displayValue}
+        </InspectorField>
       ) : null}
-      <InspectorField label="Vendor">{staticRead.vendor}</InspectorField>
-      <InspectorField label="Status">{staticRead.lastStatus}</InspectorField>
-      <InspectorField label="Last checked">{staticRead.lastChecked}</InspectorField>
+      <InspectorField label={lbl('vendor', 'Vendor')}>{f.vendor.displayValue}</InspectorField>
+      <InspectorField label={lbl('lastStatus', 'Status')}>{f.lastStatus.displayValue}</InspectorField>
+      <InspectorField label={lbl('lastChecked', 'Last checked')}>{f.lastChecked.displayValue}</InspectorField>
       <InspectorField label="Map group">
         {manual && manualGroupId ? manualGroupName ?? manualGroupId : '—'}
       </InspectorField>
@@ -461,6 +468,8 @@ function MapSingleDeviceInspectorFields({
     )
   }
 
+  const editableReadonly = resolveMapInspectorStaticReadModel(d).fields
+
   return (
     <>
       <div className="map-inspector__fields">
@@ -496,7 +505,7 @@ function MapSingleDeviceInspectorFields({
           <InspectorDeviceGroupField device={d} groups={groups} onCommit={commitPatch} />
         </InspectorField>
         <InspectorField label="Type">
-          <span className="map-inspector__value-readonly">{getDeviceTypeDisplayLabel(d)}</span>
+          <span className="map-inspector__value-readonly">{editableReadonly.deviceType.displayValue}</span>
         </InspectorField>
         {showCustom ? (
           <InspectorField label="Custom type (optional)">
@@ -509,7 +518,7 @@ function MapSingleDeviceInspectorFields({
           </InspectorField>
         ) : null}
         <InspectorField label="Vendor">
-          <span className="map-inspector__value-readonly">{d.vendor?.trim() ? d.vendor : '—'}</span>
+          <span className="map-inspector__value-readonly">{editableReadonly.vendor.displayValue}</span>
         </InspectorField>
         <InspectorField label="Map group">
           <span className="map-inspector__value-readonly">

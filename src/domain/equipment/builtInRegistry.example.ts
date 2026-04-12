@@ -1,6 +1,9 @@
 /**
  * Example static registry — merge with project-defined rows at runtime.
  * Applicability follows mandatory order in `fieldDefinitions.ts`.
+ *
+ * Legacy SQLite `Device` columns use aligned keys in `legacyDeviceFieldDefinitions.ts`, not these
+ * example snake_case keys.
  */
 
 import type { FieldDefinition } from './fieldDefinitions'

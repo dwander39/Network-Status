@@ -15,6 +15,10 @@ export interface FieldEnumOption {
  *
  * Requiredness for completeness is NOT on this type; use `EquipmentTypeDefinition.requiredFieldKeys`.
  */
+/**
+ * Registry `fieldKey` strings are domain-owned. For legacy `Device` columns, prefer the same string
+ * literals as runtime projection keys (see `legacyFieldKeyBridge.ts`) until a naming migration is intentional.
+ */
 export interface FieldDefinition {
   fieldKey: string
   label: string
