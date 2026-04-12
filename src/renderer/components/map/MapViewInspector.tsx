@@ -8,6 +8,7 @@ import {
   validateDeviceFormFieldValues,
   type DeviceFormFieldValues
 } from '@shared/deviceSaveValidation'
+import { resolveMapInspectorStaticReadModel } from '../../equipment/equipmentReadDisplay'
 import type { MapAutoGroupMode } from './mapAutoLayout'
 import {
   mapSelectionDeviceCount,
@@ -378,19 +379,23 @@ function StaticDeviceInspectorRows({
   manualGroupId: string | null
   manualGroupName: string | null
 }): JSX.Element {
-  const showCustom = showDeviceTypeCustomField(d)
+  const staticRead = resolveMapInspectorStaticReadModel(d)
   return (
     <>
-      <InspectorField label="Name">{d.name}</InspectorField>
-      <InspectorField label="IP">{d.ip}</InspectorField>
-      <InspectorField label="Subnet">{d.subnet || '—'}</InspectorField>
-      <InspectorField label="Gateway">{d.gateway || '—'}</InspectorField>
-      <InspectorField label="Group">{d.groupName?.trim() ? d.groupName : '—'}</InspectorField>
-      <InspectorField label="Type">{getDeviceTypeDisplayLabel(d)}</InspectorField>
-      {showCustom ? (
-        <InspectorField label="Custom type">{d.deviceTypeCustom?.trim() ? d.deviceTypeCustom : '—'}</InspectorField>
+      <InspectorField label="Name">{staticRead.name}</InspectorField>
+      <InspectorField label="IP">{staticRead.ip}</InspectorField>
+      <InspectorField label="MAC address">{staticRead.macAddress}</InspectorField>
+      <InspectorField label="Subnet">{staticRead.subnet}</InspectorField>
+      <InspectorField label="Gateway">{staticRead.gateway}</InspectorField>
+      <InspectorField label="Group">{staticRead.groupDisplay}</InspectorField>
+      <InspectorField label="Group ID">{staticRead.groupId}</InspectorField>
+      <InspectorField label="Type">{staticRead.typeDisplay}</InspectorField>
+      {staticRead.customTypeRowVisible ? (
+        <InspectorField label="Custom type">{staticRead.customTypeDisplay}</InspectorField>
       ) : null}
-      <InspectorField label="Vendor">{d.vendor?.trim() ? d.vendor : '—'}</InspectorField>
+      <InspectorField label="Vendor">{staticRead.vendor}</InspectorField>
+      <InspectorField label="Status">{staticRead.lastStatus}</InspectorField>
+      <InspectorField label="Last checked">{staticRead.lastChecked}</InspectorField>
       <InspectorField label="Map group">
         {manual && manualGroupId ? manualGroupName ?? manualGroupId : '—'}
       </InspectorField>

@@ -19,11 +19,16 @@ export const LEGACY_DEVICE_RUNTIME_VALUE_KEYS = [
   'name',
   'ip',
   'macAddress',
+  'subnet',
+  'gateway',
   'vendor',
   'deviceType',
+  'deviceTypeCustom',
   'lastStatus',
   'lastChecked',
-  'groupId'
+  'groupId',
+  // Joined list-group label from device_groups; canonical id remains groupId.
+  'groupName'
 ] as const
 
 export type LegacyDeviceRuntimeValueKey = (typeof LEGACY_DEVICE_RUNTIME_VALUE_KEYS)[number]
@@ -100,11 +105,15 @@ export function mapDeviceToEquipmentRuntime(device: Device): EquipmentRuntimePro
     name: textOrEmpty(device.name),
     ip: textOrEmpty(device.ip),
     macAddress: macAddressProjection(device.macAddress),
+    subnet: textOrEmpty(device.subnet),
+    gateway: textOrEmpty(device.gateway),
     vendor: vendorProjection(device.vendor),
     deviceType: enumValue(deviceType),
+    deviceTypeCustom: textOrEmpty(device.deviceTypeCustom),
     lastStatus: enumValue(lastStatus),
     lastChecked: lastCheckedProjection(device.lastChecked),
-    groupId: groupIdProjection(device.groupId)
+    groupId: groupIdProjection(device.groupId),
+    groupName: textOrEmpty(device.groupName)
   }
 
   return {
