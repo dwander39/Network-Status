@@ -2,8 +2,7 @@ import type Database from 'better-sqlite3'
 import { v4 as uuidv4 } from 'uuid'
 import type { ArpEntry } from '@shared/types'
 import { assertValidIPv4 } from '@shared/ipValidation'
-import { getDeviceByIp } from './deviceRepository'
-import { inferDeviceType } from '../services/deviceFingerprint'
+import { applyDiscoverySyncFromArpRow } from '../services/equipmentMutationService'
 import { getLastNetworkContext, getStableNetworkId } from '../services/networkDetection'
 
 function rowToArp(row: Record<string, unknown>): ArpEntry {
@@ -94,7 +93,10 @@ export interface UpsertArpBatchOptions {
   onMacChangeConfirmed?: (ev: MacChangeConfirmedEvent) => void
 }
 
-/** Merge scan results: upsert arp_entries, sync MAC onto saved devices; optionally mirror OS snapshot. */
+/**
+ * Merge scan results: upsert arp_entries, sync discovery fields onto saved devices via
+ * `equipmentMutationService` (no direct `devices` updates here); optionally mirror OS snapshot.
+ */
 export function upsertArpBatch(
   db: Database.Database,
   rows: ArpUpsertRow[],
@@ -113,10 +115,6 @@ export function upsertArpBatch(
        vendor = COALESCE(excluded.vendor, arp_entries.vendor),
        last_seen = excluded.last_seen,
        network_id = COALESCE(excluded.network_id, arp_entries.network_id)`
-  )
-
-  const updateDeviceMac = db.prepare(
-    `UPDATE devices SET mac_address = ?, vendor = COALESCE(?, vendor), device_type = ? WHERE ip = ?`
   )
 
   const insertMacChange = db.prepare(
@@ -193,11 +191,11 @@ export function upsertArpBatch(
         }
       }
 
-      const dev = getDeviceByIp(db, ip)
-      if (dev) {
-        const deviceType = inferDeviceType({ ip: dev.ip, gateway: dev.gateway, vendor: r.vendor })
-        updateDeviceMac.run(mac, r.vendor, deviceType, ip)
-      }
+      applyDiscoverySyncFromArpRow(db, {
+        lookupIp: ip,
+        normalizedMac: mac,
+        arpVendor: r.vendor
+      })
     }
 
     if (options.snapshotPrune && tag != null) {

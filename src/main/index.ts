@@ -3,14 +3,14 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { writeFile } from 'fs/promises'
 import { getDatabase, closeDatabase } from './db/database'
+import { listDevices } from './db/deviceRepository'
 import {
-  listDevices,
-  saveDevice,
-  deleteDevice,
-  deleteAllDevices,
-  deleteDevicesForNetwork,
-  setDeviceGroup
-} from './db/deviceRepository'
+  applyUserSaveDevicePayload,
+  applyUserSetDeviceGroup,
+  mutateLifecycleDeleteAllDevices,
+  mutateLifecycleDeleteDeviceById,
+  mutateLifecycleDeleteDevicesForNetwork
+} from './services/equipmentMutationService'
 import {
   deleteDeviceGroup,
   listDeviceGroups,
@@ -342,7 +342,7 @@ function registerIpc(): void {
     }
     const { networkId } = deleteNetworkProfileById(db, id)
     // Remove all scoped data for this network id to avoid cross-network leakage/orphans.
-    deleteDevicesForNetwork(db, networkId)
+    mutateLifecycleDeleteDevicesForNetwork(db, networkId, 'system')
     deleteArpEntriesForNetwork(db, networkId)
     deleteMapLayoutForNetwork(db, networkId)
     db.prepare(`DELETE FROM alert_rules WHERE network_id = ?`).run(networkId)
@@ -539,7 +539,7 @@ function registerIpc(): void {
     let devicesRemoved = 0
     let arpRemoved = 0
     if (payload.scope === 'all') {
-      devicesRemoved = deleteAllDevices(db)
+      devicesRemoved = mutateLifecycleDeleteAllDevices(db, 'system').deletedCount
       if (payload.includeArp) {
         arpRemoved = deleteAllArpEntries(db)
         clearDismissedDiscovered(db)
@@ -551,7 +551,7 @@ function registerIpc(): void {
           'Not connected to a recognized network — connect first, or use “all networks” purge.'
         )
       }
-      devicesRemoved = deleteDevicesForNetwork(db, nid)
+      devicesRemoved = mutateLifecycleDeleteDevicesForNetwork(db, nid, 'system').deletedCount
       if (payload.includeArp) {
         arpRemoved = deleteArpEntriesForNetwork(db, nid)
       }
@@ -681,14 +681,14 @@ function registerIpc(): void {
   })
 
   ipcMain.handle(IPC.SET_DEVICE_GROUP, (_e, deviceId: string, groupId: string | null) => {
-    const d = setDeviceGroup(getDatabase(), deviceId, groupId)
+    const d = applyUserSetDeviceGroup(getDatabase(), deviceId, groupId)
     mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
     refreshTray()
     return d
   })
 
   ipcMain.handle(IPC.SAVE_DEVICE, (_e, payload: SaveDevicePayload) => {
-    const d = saveDevice(getDatabase(), payload)
+    const d = applyUserSaveDevicePayload(getDatabase(), payload)
     mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
     pushArpToRenderer()
     refreshTray()
@@ -696,7 +696,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle(IPC.DELETE_DEVICE, (_e, id: string) => {
-    deleteDevice(getDatabase(), id)
+    mutateLifecycleDeleteDeviceById(getDatabase(), id, 'user')
     mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
     pushArpToRenderer()
     refreshTray()

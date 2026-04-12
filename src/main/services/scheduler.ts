@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { BrowserWindow } from 'electron'
-import { listDevices, setAllDevicesStatus } from '../db/deviceRepository'
+import { listDevices } from '../db/deviceRepository'
+import { mutateMonitoringBulkStatus } from './equipmentMutationService'
 import { getSettings } from '../db/settingsRepository'
 import { listArpEntries, listDiscoveredDevices } from '../db/arpRepository'
 import { pingAllDevices } from './pingService'
@@ -88,7 +89,7 @@ export function startScheduler(
       if (settings.listenAdapterNames.length === 0) {
         // User selected no adapters: treat monitoring as disabled and force UI to show offline.
         // Do not emit offline notifications in this state.
-        setAllDevicesStatus(
+        mutateMonitoringBulkStatus(
           db,
           'offline',
           new Date().toISOString(),

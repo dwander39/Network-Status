@@ -1,9 +1,7 @@
 import type Database from 'better-sqlite3'
 import { v4 as uuidv4 } from 'uuid'
-import type { Device, DeviceStatus, DeviceType, SaveDevicePayload } from '@shared/types'
-import { assertValidIPv4 } from '@shared/ipValidation'
+import type { Device, DeviceStatus, DeviceType } from '@shared/types'
 import { lookupVendor } from '../services/vendorLookup'
-import { getDeviceGroupById } from './groupRepository'
 import { inferDeviceType } from '../services/deviceFingerprint'
 import { normalizeDeviceTypeCustom } from '@shared/deviceTypeDisplay'
 import { getLastNetworkContext, getStableNetworkId } from '../services/networkDetection'
@@ -71,101 +69,62 @@ export function getDeviceByIp(db: Database.Database, ip: string): Device | null 
   return row ? rowToDevice(row) : null
 }
 
-export function saveDevice(db: Database.Database, input: SaveDevicePayload): Device {
-  assertValidIPv4('IP address', input.ip)
-  if (input.subnet.trim()) assertValidIPv4('Subnet mask', input.subnet)
-  if (input.gateway.trim()) assertValidIPv4('Gateway', input.gateway)
-
-  const id = input.id ?? uuidv4()
-
-  const resolveGroupId = (existing: Device | null): string | null => {
-    if (input.groupId !== undefined) {
-      const gid = input.groupId
-      if (gid) {
-        const g = getDeviceGroupById(db, gid)
-        if (!g) throw new Error('Invalid group')
-      }
-      return gid
-    }
-    return existing?.groupId ?? null
+/**
+ * Persistence only: insert or update a device row. Callers must validate, check IP conflicts,
+ * and resolve group ids. Routed through `equipmentMutationService` for user saves.
+ */
+export function persistNormalizedDevice(
+  db: Database.Database,
+  input: {
+    mode: 'insert' | 'update'
+    id: string
+    name: string
+    ip: string
+    subnet: string
+    gateway: string
+    groupId: string | null
+    networkId: string | null
+    /** When false on update, `device_type_custom` column is left unchanged. */
+    touchDeviceTypeCustom: boolean
+    /** Normalized custom type; used on insert always; on update only when touchDeviceTypeCustom. */
+    deviceTypeCustom: string | null
   }
+): void {
+  const {
+    mode,
+    id,
+    name,
+    ip,
+    subnet,
+    gateway,
+    groupId,
+    networkId,
+    touchDeviceTypeCustom,
+    deviceTypeCustom
+  } = input
 
-  if (input.id) {
-    const existingDevice = getDeviceById(db, input.id)
-    if (!existingDevice) throw new Error('Device not found')
-    const conflict = db
-      .prepare(`SELECT id FROM devices WHERE ip = ? AND id != ?`)
-      .get(input.ip, id) as { id: string } | undefined
-    if (conflict) throw new Error('Another device already uses this IP')
-
-    const nextGroupId = resolveGroupId(existingDevice)
-
-    const tag = getLastNetworkContext()?.networkId ?? getStableNetworkId()
-    const custom =
-      input.deviceTypeCustom !== undefined
-        ? normalizeDeviceTypeCustom(input.deviceTypeCustom)
-        : undefined
-    if (custom !== undefined) {
+  if (mode === 'update') {
+    if (touchDeviceTypeCustom) {
       db.prepare(
         `UPDATE devices SET name = ?, ip = ?, subnet = ?, gateway = ?, group_id = ?, network_id = ?, device_type_custom = ? WHERE id = ?`
-      ).run(
-        input.name.trim(),
-        input.ip.trim(),
-        input.subnet.trim(),
-        input.gateway.trim(),
-        nextGroupId,
-        tag,
-        custom,
-        id
-      )
+      ).run(name, ip, subnet, gateway, groupId, networkId, deviceTypeCustom, id)
     } else {
       db.prepare(
         `UPDATE devices SET name = ?, ip = ?, subnet = ?, gateway = ?, group_id = ?, network_id = ? WHERE id = ?`
-      ).run(
-        input.name.trim(),
-        input.ip.trim(),
-        input.subnet.trim(),
-        input.gateway.trim(),
-        nextGroupId,
-        tag,
-        id
-      )
+      ).run(name, ip, subnet, gateway, groupId, networkId, id)
     }
-  } else {
-    const conflict = db.prepare(`SELECT id FROM devices WHERE ip = ?`).get(input.ip)
-    if (conflict) throw new Error('A device with this IP already exists')
-
-    let nextGroupId: string | null = null
-    if (input.groupId !== undefined) {
-      nextGroupId = input.groupId
-      if (nextGroupId) {
-        const g = getDeviceGroupById(db, nextGroupId)
-        if (!g) throw new Error('Invalid group')
-      }
-    }
-
-    const tag = getLastNetworkContext()?.networkId ?? getStableNetworkId()
-    const customNew =
-      input.deviceTypeCustom !== undefined
-        ? normalizeDeviceTypeCustom(input.deviceTypeCustom)
-        : null
-    db.prepare(
-      `INSERT INTO devices (id, name, ip, subnet, gateway, group_id, network_id, last_status, last_checked, device_type_custom)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)`
-    ).run(
-      id,
-      input.name.trim(),
-      input.ip.trim(),
-      input.subnet.trim(),
-      input.gateway.trim(),
-      nextGroupId,
-      tag,
-      new Date().toISOString(),
-      customNew
-    )
+    return
   }
 
-  return getDeviceById(db, id)!
+  db.prepare(
+    `INSERT INTO devices (id, name, ip, subnet, gateway, group_id, network_id, last_status, last_checked, device_type_custom)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)`
+  ).run(id, name, ip, subnet, gateway, groupId, networkId, new Date().toISOString(), deviceTypeCustom)
+}
+
+/** @internal Used when the mutation service allocates a new id before persist. */
+export function allocateDeviceId(): string {
+  return uuidv4()
 }
 
 export function getDeviceById(db: Database.Database, id: string): Device | null {
@@ -175,63 +134,96 @@ export function getDeviceById(db: Database.Database, id: string): Device | null 
   return row ? rowToDevice(row) : null
 }
 
-export function setDeviceGroup(
+/**
+ * Persistence only: set `group_id`.
+ * Returns sqlite `changes` (may be 0 when the new value equals the old value; callers should not
+ * treat 0 alone as “device missing”).
+ */
+export function persistDeviceGroupId(
   db: Database.Database,
   deviceId: string,
   groupId: string | null
-): Device {
-  if (groupId) {
-    const g = getDeviceGroupById(db, groupId)
-    if (!g) throw new Error('Invalid group')
-  }
-  const r = db.prepare(`UPDATE devices SET group_id = ? WHERE id = ?`).run(groupId, deviceId)
-  if (r.changes === 0) throw new Error('Device not found')
-  return getDeviceById(db, deviceId)!
+): number {
+  return db.prepare(`UPDATE devices SET group_id = ? WHERE id = ?`).run(groupId, deviceId).changes
 }
 
-export function deleteDevice(db: Database.Database, id: string): boolean {
+/**
+ * Persistence only: hard-delete one device row and its map node positions. Returns whether a row
+ * was removed. Policy/existence messaging lives in `equipmentMutationService`.
+ */
+export function persistDeleteDeviceById(db: Database.Database, id: string): boolean {
   const r = db.prepare(`DELETE FROM devices WHERE id = ?`).run(id)
   if (r.changes > 0) deleteMapLayoutRowsForNodeKey(db, id)
   return r.changes > 0
 }
 
-/** Remove every saved device (all networks). Returns rows deleted. */
-export function deleteAllDevices(db: Database.Database): number {
+/** Persistence only: all devices + all map layout state. Returns device rows deleted. */
+export function persistDeleteAllDevices(db: Database.Database): number {
   deleteAllMapLayout(db)
   return db.prepare(`DELETE FROM devices`).run().changes
 }
 
-/** Remove monitored devices tagged for one LAN (`network_id` must match stored fingerprint). */
-export function deleteDevicesForNetwork(db: Database.Database, networkId: string): number {
+/**
+ * Persistence only: devices tagged with `network_id` + map layout for that network.
+ * Returns device rows deleted.
+ */
+export function persistDeleteDevicesByNetworkId(db: Database.Database, networkId: string): number {
   deleteMapLayoutForNetwork(db, networkId)
   return db.prepare(`DELETE FROM devices WHERE network_id = ?`).run(networkId).changes
 }
 
-/** Update reachability result after a ping round. */
-export function updateDeviceStatus(
+/**
+ * Persistence only: monitoring fields on one row. Returns sqlite row change count.
+ * Orchestration (validation, existence) lives in `equipmentMutationService`.
+ */
+export function persistDeviceMonitoringStatus(
   db: Database.Database,
-  id: string,
+  deviceId: string,
   status: DeviceStatus,
-  checkedIso: string
-): void {
-  db.prepare(
-    `UPDATE devices SET last_status = ?, last_checked = ? WHERE id = ?`
-  ).run(status, checkedIso, id)
+  lastCheckedIso: string
+): number {
+  return db
+    .prepare(`UPDATE devices SET last_status = ?, last_checked = ? WHERE id = ?`)
+    .run(status, lastCheckedIso, deviceId).changes
 }
 
-/** Bulk status update (used when monitoring is disabled). Only touches current-LAN rows + legacy NULL. */
-export function setAllDevicesStatus(
+/**
+ * Persistence only: bulk monitoring update. When `networkId` is null/undefined, resolves like
+ * legacy `setAllDevicesStatus` and either updates all rows (no stable network) or scoped rows.
+ */
+export function persistAllDevicesMonitoringStatus(
   db: Database.Database,
   status: DeviceStatus,
-  checkedIso: string,
+  lastCheckedIso: string,
   networkId?: string | null
-): void {
+): number {
   const nid = networkId !== undefined ? networkId : getStableNetworkId()
   if (nid == null) {
-    db.prepare(`UPDATE devices SET last_status = ?, last_checked = ?`).run(status, checkedIso)
-    return
+    return db
+      .prepare(`UPDATE devices SET last_status = ?, last_checked = ?`)
+      .run(status, lastCheckedIso).changes
   }
-  db.prepare(
-    `UPDATE devices SET last_status = ?, last_checked = ? WHERE network_id IS NULL OR network_id = ?`
-  ).run(status, checkedIso, nid)
+  return db
+    .prepare(
+      `UPDATE devices SET last_status = ?, last_checked = ? WHERE network_id IS NULL OR network_id = ?`
+    )
+    .run(status, lastCheckedIso, nid).changes
+}
+
+/**
+ * Persistence only: discovery/ARP-owned columns on one row, keyed by canonical `deviceId`.
+ * `vendor` uses SQL COALESCE with the new value (null keeps the stored vendor), matching legacy ARP sync.
+ */
+export function persistDeviceDiscoveryFieldsById(
+  db: Database.Database,
+  deviceId: string,
+  macAddress: string,
+  vendor: string | null,
+  deviceType: DeviceType
+): number {
+  return db
+    .prepare(
+      `UPDATE devices SET mac_address = ?, vendor = COALESCE(?, vendor), device_type = ? WHERE id = ?`
+    )
+    .run(macAddress, vendor, deviceType, deviceId).changes
 }
