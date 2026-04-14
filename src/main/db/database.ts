@@ -5,6 +5,7 @@ import { mkdirSync, existsSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { normalizeNetworkId } from '../services/networkDetection'
+import { backfillMissingEquipmentValuesJsonMirrors } from './deviceRepository'
 
 let db: Database.Database | null = null
 
@@ -69,6 +70,12 @@ export function getDatabase(): Database.Database {
   migrateCanonicalizeNetworkIds(db)
   seedDefaultSettings(db)
   ensureSettingsKeys(db)
+
+  const mirrorBackfilled = backfillMissingEquipmentValuesJsonMirrors(db)
+  if (process.env.NODE_ENV === 'development' && mirrorBackfilled > 0) {
+    console.info(`[db] backfilled equipment_values_json for ${mirrorBackfilled} device(s)`)
+  }
+
   return db
 }
 

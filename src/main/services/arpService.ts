@@ -22,6 +22,7 @@ import type { EventType } from '@shared/types'
 import { EventLogService } from './eventLogService'
 import { EVENT_LOG_NETWORK_UNKNOWN } from '@shared/eventLog'
 import { getDeviceByIp } from '../db/deviceRepository'
+import { applyDiscoveryUpdate } from './equipmentMutationService'
 
 const execFileAsync = promisify(execFile)
 
@@ -209,6 +210,14 @@ export async function scanArpCache(db: Database.Database, eventLogs?: EventLogSe
   upsertArpBatch(db, rows, seenIso, {
     snapshotPrune,
     networkId,
+    onDiscoveryDeviceArpRow: (input) => {
+      applyDiscoveryUpdate(
+        db,
+        { lookupIp: input.lookupIp },
+        { normalizedMac: input.normalizedMac, arpVendor: input.arpVendor },
+        { source: 'discovery' }
+      )
+    },
     onMacChangeConfirmed: (ev) => {
       onMacAddressChangeConfirmed(db, ev, networkId, eventLogs)
       eventLogs?.log({

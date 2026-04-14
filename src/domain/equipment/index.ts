@@ -4,6 +4,7 @@
  */
 
 export * from './valueTypes'
+export * from './equipmentValuesMirror'
 export * from './legacyFieldKeyBridge'
 export * from './legacyDeviceFieldDefinitions'
 export * from './deviceEquipmentAdapter'

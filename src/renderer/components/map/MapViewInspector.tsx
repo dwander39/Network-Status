@@ -1,16 +1,25 @@
 import type { ReactNode } from 'react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Node } from '@xyflow/react'
-import type { Device, DeviceGroup, MapLayoutBundle, NetworkInfo, SaveDevicePayload } from '@shared/types'
+import type {
+  Device,
+  DeviceGroup,
+  EquipmentRuntimeReadSource,
+  MapLayoutBundle,
+  NetworkInfo,
+  SaveDevicePayload
+} from '@shared/types'
 import { DEVICE_TYPE_CUSTOM_MAX_LEN } from '@shared/deviceTypeDisplay'
 import {
   showDeviceTypeCustomField,
   validateDeviceFormFieldValues,
   type DeviceFormFieldValues
 } from '@shared/deviceSaveValidation'
+import type { MapInspectorStaticResolvedFields } from '../../equipment/resolvedReadField'
 import {
   mapInspectorStaticLabelFromLegacyDefinition,
-  resolveMapInspectorStaticReadModel
+  resolveMapInspectorStaticReadModel,
+  resolveMapInspectorStaticReadModelWithJsonHydrationExperiment
 } from '../../equipment/equipmentReadDisplay'
 import type { MapAutoGroupMode } from './mapAutoLayout'
 import {
@@ -75,6 +84,55 @@ export interface MapViewInspectorProps {
   deviceGroups: DeviceGroup[]
   /** Persist device edits via `api.saveDevice` (same path as add/edit device). */
   onSaveDevice: (payload: SaveDevicePayload) => Promise<void>
+}
+
+/**
+ * Dev-only: choose default column projection vs JSON mirror hydration experiment for static inspector rows.
+ * Production: always column path; `readSource` is null (no indicator).
+ */
+function resolveDeviceInspectorStaticRead(
+  device: Device,
+  jsonMirrorExperiment: boolean
+): { fields: MapInspectorStaticResolvedFields; readSource: EquipmentRuntimeReadSource | null } {
+  if (import.meta.env.DEV && jsonMirrorExperiment) {
+    const r = resolveMapInspectorStaticReadModelWithJsonHydrationExperiment(
+      device,
+      device.equipmentValuesJson ?? null
+    )
+    return { fields: r.fields, readSource: r.readSource }
+  }
+  const r = resolveMapInspectorStaticReadModel(device)
+  return { fields: r.fields, readSource: null }
+}
+
+/** Dev-only UI; returns null in production builds. */
+function MapInspectorDevJsonMirrorReadBar({
+  enabled,
+  onEnabledChange,
+  readSource
+}: {
+  enabled: boolean
+  onEnabledChange: (next: boolean) => void
+  readSource: EquipmentRuntimeReadSource | null
+}): JSX.Element | null {
+  if (!import.meta.env.DEV) return null
+  return (
+    <div className="map-inspector__dev-json-mirror-bar">
+      <label className="map-inspector__dev-json-mirror-label muted">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => onEnabledChange(e.target.checked)}
+        />
+        Use JSON mirror read (experimental, non-authoritative)
+      </label>
+      {enabled && readSource != null ? (
+        <p className="map-inspector__hint muted map-inspector__dev-read-source">
+          Read source: <code>{readSource}</code>
+        </p>
+      ) : null}
+    </div>
+  )
 }
 
 function InspectorField({ label, children }: { label: string; children: ReactNode }): JSX.Element {
@@ -372,18 +430,16 @@ function InspectorDeviceGroupField({
 }
 
 function StaticDeviceInspectorRows({
-  d,
+  fields: f,
   manual,
   manualGroupId,
   manualGroupName
 }: {
-  d: Device
+  fields: MapInspectorStaticResolvedFields
   manual: boolean
   manualGroupId: string | null
   manualGroupName: string | null
 }): JSX.Element {
-  const staticRead = resolveMapInspectorStaticReadModel(d)
-  const f = staticRead.fields
   const lbl = mapInspectorStaticLabelFromLegacyDefinition
   return (
     <>
@@ -417,7 +473,8 @@ function MapSingleDeviceInspectorFields({
   manualGroupName,
   editable,
   groups,
-  onSaveDevice
+  onSaveDevice,
+  inspectorStaticFields
 }: {
   d: Device
   manual: boolean
@@ -426,6 +483,8 @@ function MapSingleDeviceInspectorFields({
   editable: boolean
   groups: DeviceGroup[]
   onSaveDevice: (payload: SaveDevicePayload) => Promise<void>
+  /** Resolved static read rows (default or JSON experiment); keeps editable inspector aligned with toggle. */
+  inspectorStaticFields: MapInspectorStaticResolvedFields
 }): JSX.Element {
   const showCustom = showDeviceTypeCustomField(d)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -459,7 +518,7 @@ function MapSingleDeviceInspectorFields({
     return (
       <div className="map-inspector__fields">
         <StaticDeviceInspectorRows
-          d={d}
+          fields={inspectorStaticFields}
           manual={manual}
           manualGroupId={manualGroupId}
           manualGroupName={manualGroupName}
@@ -468,7 +527,7 @@ function MapSingleDeviceInspectorFields({
     )
   }
 
-  const editableReadonly = resolveMapInspectorStaticReadModel(d).fields
+  const editableReadonly = inspectorStaticFields
 
   return (
     <>
@@ -552,6 +611,7 @@ export function MapViewInspector({
   const readOnlyView = !manual
   const deviceById = new Map(devices.map((d) => [d.id, d]))
   const deviceInspectorEditable = actionsEnabled
+  const [devJsonMirrorInspectorRead, setDevJsonMirrorInspectorRead] = useState(false)
 
   /** Locked-group child click: map selection stays manual-group; inspector shows the device if peek is valid. */
   let lockedGroupChildPeekId: string | null = null
@@ -603,6 +663,7 @@ export function MapViewInspector({
   if (lockedGroupChildPeekId != null) {
     const d = deviceById.get(lockedGroupChildPeekId)
     const { manualGroupId, manualGroupName } = deviceMapGroupInfo(lockedGroupChildPeekId, savedBundle, nodes)
+    const peekResolved = d ? resolveDeviceInspectorStaticRead(d, devJsonMirrorInspectorRead) : null
     return (
       <div className="map-inspector">
         <h3 className="map-inspector__title">Device</h3>
@@ -613,14 +674,21 @@ export function MapViewInspector({
         {!d ? (
           <p className="muted">This device is no longer in the list.</p>
         ) : (
-          <div className="map-inspector__fields">
-            <StaticDeviceInspectorRows
-              d={d}
-              manual={manual}
-              manualGroupId={manualGroupId}
-              manualGroupName={manualGroupName}
+          <>
+            <MapInspectorDevJsonMirrorReadBar
+              enabled={devJsonMirrorInspectorRead}
+              onEnabledChange={setDevJsonMirrorInspectorRead}
+              readSource={peekResolved?.readSource ?? null}
             />
-          </div>
+            <div className="map-inspector__fields">
+              <StaticDeviceInspectorRows
+                fields={peekResolved!.fields}
+                manual={manual}
+                manualGroupId={manualGroupId}
+                manualGroupName={manualGroupName}
+              />
+            </div>
+          </>
         )}
       </div>
     )
@@ -629,6 +697,7 @@ export function MapViewInspector({
   if (mapSelection.kind === 'device') {
     const d = deviceById.get(mapSelection.deviceId)
     const { manualGroupId, manualGroupName } = deviceMapGroupInfo(mapSelection.deviceId, savedBundle, nodes)
+    const deviceResolved = d ? resolveDeviceInspectorStaticRead(d, devJsonMirrorInspectorRead) : null
     return (
       <div className="map-inspector">
         <h3 className="map-inspector__title">Device</h3>
@@ -636,15 +705,23 @@ export function MapViewInspector({
         {!d ? (
           <p className="muted">This device is no longer in the list.</p>
         ) : (
-          <MapSingleDeviceInspectorFields
-            d={d}
-            manual={manual}
-            manualGroupId={manualGroupId}
-            manualGroupName={manualGroupName}
-            editable={deviceInspectorEditable}
-            groups={deviceGroups}
-            onSaveDevice={onSaveDevice}
-          />
+          <>
+            <MapInspectorDevJsonMirrorReadBar
+              enabled={devJsonMirrorInspectorRead}
+              onEnabledChange={setDevJsonMirrorInspectorRead}
+              readSource={deviceResolved?.readSource ?? null}
+            />
+            <MapSingleDeviceInspectorFields
+              d={d}
+              manual={manual}
+              manualGroupId={manualGroupId}
+              manualGroupName={manualGroupName}
+              editable={deviceInspectorEditable}
+              groups={deviceGroups}
+              onSaveDevice={onSaveDevice}
+              inspectorStaticFields={deviceResolved!.fields}
+            />
+          </>
         )}
         {readOnlyView ? (
           <p className="map-inspector__hint muted">Device positions in this view are computed, not edited here.</p>

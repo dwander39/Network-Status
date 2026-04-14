@@ -3,13 +3,18 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { writeFile } from 'fs/promises'
 import { getDatabase, closeDatabase } from './db/database'
-import { listDevices } from './db/deviceRepository'
+import {
+  debugResolveEquipmentRuntimeProjectionWithJsonHydration,
+  listDevices,
+  verifyAllEquipmentValuesMirrorRows,
+  verifyEquipmentValuesMirrorRow
+} from './db/deviceRepository'
 import {
   applyUserSaveDevicePayload,
   applyUserSetDeviceGroup,
-  mutateLifecycleDeleteAllDevices,
-  mutateLifecycleDeleteDeviceById,
-  mutateLifecycleDeleteDevicesForNetwork
+  deleteAllDevices,
+  deleteDevice,
+  deleteDevicesForNetwork
 } from './services/equipmentMutationService'
 import {
   deleteDeviceGroup,
@@ -332,7 +337,7 @@ function registerIpc(): void {
     return p
   })
 
-  ipcMain.handle(IPC.DELETE_NETWORK_PROFILE, (_e, id: string) => {
+  ipcMain.handle(IPC.DELETE_NETWORK_PROFILE, async (_e, id: string) => {
     const db = getDatabase()
     const list = listNetworkProfiles(db, uiNetworkId())
     const target = list.find((p) => p.id === id) ?? null
@@ -342,7 +347,7 @@ function registerIpc(): void {
     }
     const { networkId } = deleteNetworkProfileById(db, id)
     // Remove all scoped data for this network id to avoid cross-network leakage/orphans.
-    mutateLifecycleDeleteDevicesForNetwork(db, networkId, 'system')
+    await deleteDevicesForNetwork(db, networkId, { source: 'user' })
     deleteArpEntriesForNetwork(db, networkId)
     deleteMapLayoutForNetwork(db, networkId)
     db.prepare(`DELETE FROM alert_rules WHERE network_id = ?`).run(networkId)
@@ -534,12 +539,12 @@ function registerIpc(): void {
     return ok
   })
 
-  ipcMain.handle(IPC.PURGE_DEVICE_CACHE, (_e, payload: PurgeDeviceCachePayload) => {
+  ipcMain.handle(IPC.PURGE_DEVICE_CACHE, async (_e, payload: PurgeDeviceCachePayload) => {
     const db = getDatabase()
     let devicesRemoved = 0
     let arpRemoved = 0
     if (payload.scope === 'all') {
-      devicesRemoved = mutateLifecycleDeleteAllDevices(db, 'system').deletedCount
+      devicesRemoved = (await deleteAllDevices(db, { source: 'user' })).deletedCount
       if (payload.includeArp) {
         arpRemoved = deleteAllArpEntries(db)
         clearDismissedDiscovered(db)
@@ -551,7 +556,7 @@ function registerIpc(): void {
           'Not connected to a recognized network — connect first, or use “all networks” purge.'
         )
       }
-      devicesRemoved = mutateLifecycleDeleteDevicesForNetwork(db, nid, 'system').deletedCount
+      devicesRemoved = (await deleteDevicesForNetwork(db, nid, { source: 'user' })).deletedCount
       if (payload.includeArp) {
         arpRemoved = deleteArpEntriesForNetwork(db, nid)
       }
@@ -695,12 +700,25 @@ function registerIpc(): void {
     return d
   })
 
-  ipcMain.handle(IPC.DELETE_DEVICE, (_e, id: string) => {
-    mutateLifecycleDeleteDeviceById(getDatabase(), id, 'user')
+  ipcMain.handle(IPC.DELETE_DEVICE, async (_e, id: string) => {
+    await deleteDevice(getDatabase(), id, { source: 'user' })
     mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
     pushArpToRenderer()
     refreshTray()
   })
+
+  /** Debug/maintenance: read-only mirror check (DevTools `window.ssApi.debugVerifyEquipmentMirrorDevice(id)`). */
+  ipcMain.handle(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_DEVICE, (_e, deviceId: string) =>
+    verifyEquipmentValuesMirrorRow(getDatabase(), String(deviceId ?? ''))
+  )
+  ipcMain.handle(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_SCAN, () =>
+    verifyAllEquipmentValuesMirrorRows(getDatabase())
+  )
+
+  /** Debug/maintenance: JSON hydration experiment + fallback (DevTools `window.ssApi.debugResolveEquipmentRuntimeJsonHydration(id)`). */
+  ipcMain.handle(IPC.DEBUG_MAINTENANCE_RESOLVE_EQUIPMENT_RUNTIME_JSON_HYDRATION, (_e, deviceId: string) =>
+    debugResolveEquipmentRuntimeProjectionWithJsonHydration(getDatabase(), String(deviceId ?? ''))
+  )
 
   ipcMain.handle(IPC.GET_ARP, () => ({
     entries: listArpEntries(getDatabase(), uiNetworkId()),

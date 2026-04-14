@@ -1,7 +1,7 @@
 import ping from 'ping'
 import type { Device, DeviceStatus } from '@shared/types'
 import type Database from 'better-sqlite3'
-import { mutateMonitoringDeviceStatus } from './equipmentMutationService'
+import { updateDeviceStatus } from './equipmentMutationService'
 import net from 'net'
 
 /**
@@ -96,11 +96,12 @@ export async function pingAllDevices(
   devices: Device[]
 ): Promise<PingRoundResult[]> {
   const checkedIso = new Date().toISOString()
+  const checkedMs = Date.parse(checkedIso)
   const outcomes = await runPool(devices, CONCURRENCY, async (d) => {
     const alive = await probeHost(d.ip)
     const current: DeviceStatus = alive ? 'online' : 'offline'
     const previous = d.lastStatus
-    mutateMonitoringDeviceStatus(db, d.id, current, checkedIso)
+    updateDeviceStatus(db, d.id, current, { source: 'monitoring', timestamp: checkedMs })
     const offlineTransition = previous === 'online' && current === 'offline'
     const onlineTransition = previous === 'offline' && current === 'online'
     return {

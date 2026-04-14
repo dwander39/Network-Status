@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3'
 import { v4 as uuidv4 } from 'uuid'
 import type { ArpEntry } from '@shared/types'
 import { assertValidIPv4 } from '@shared/ipValidation'
-import { applyDiscoverySyncFromArpRow } from '../services/equipmentMutationService'
+import type { DiscoveryArpRowInput } from '../services/equipmentMutationService'
 import { getLastNetworkContext, getStableNetworkId } from '../services/networkDetection'
 
 function rowToArp(row: Record<string, unknown>): ArpEntry {
@@ -91,11 +91,16 @@ export interface UpsertArpBatchOptions {
   networkId?: string | null
   /** Invoked after a MAC change is confirmed (same new MAC seen twice). */
   onMacChangeConfirmed?: (ev: MacChangeConfirmedEvent) => void
+  /**
+   * After each persisted ARP row, sync discovery onto a matching saved device via mutation service.
+   * Repository does not import orchestration — caller supplies this hook (typically `applyDiscoveryUpdate`).
+   */
+  onDiscoveryDeviceArpRow?: (input: DiscoveryArpRowInput) => void
 }
 
 /**
- * Merge scan results: upsert arp_entries, sync discovery fields onto saved devices via
- * `equipmentMutationService` (no direct `devices` updates here); optionally mirror OS snapshot.
+ * Merge scan results: upsert arp_entries; optional discovery sync via `onDiscoveryDeviceArpRow`
+ * (no direct `devices` updates in this module); optionally mirror OS snapshot.
  */
 export function upsertArpBatch(
   db: Database.Database,
@@ -191,7 +196,7 @@ export function upsertArpBatch(
         }
       }
 
-      applyDiscoverySyncFromArpRow(db, {
+      options.onDiscoveryDeviceArpRow?.({
         lookupIp: ip,
         normalizedMac: mac,
         arpVendor: r.vendor

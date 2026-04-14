@@ -14,6 +14,10 @@ import {
 } from '@shared/deviceSaveValidation'
 import { normalizeDeviceTypeCustom } from '@shared/deviceTypeDisplay'
 import {
+  compareEquipmentMirrorStoredToDevice,
+  serializeEquipmentValuesMirrorPayload
+} from '../../domain/equipment/equipmentValuesMirror'
+import {
   mapDeviceToEquipmentRuntime,
   type EquipmentRuntimeProjection
 } from '../../domain/equipment/deviceEquipmentAdapter'
@@ -39,6 +43,24 @@ import { getDeviceGroupById } from '../db/groupRepository'
 
 /** Who initiated the mutation; extends later for ARP, ping, and automation. */
 export type EquipmentMutationSource = 'user' | 'system' | 'discovery' | 'monitoring'
+
+export interface MonitoringMutationContext {
+  source: 'monitoring'
+  /** Optional epoch millis; defaults to now when omitted. */
+  timestamp?: number
+}
+
+/** Primary column ownership by writer (merge logic will consume this; not exhaustive of every DB column). */
+export type Source = 'user' | 'monitoring' | 'discovery'
+
+export const FIELD_OWNERSHIP: Record<Source, readonly string[]> = {
+  user: ['name', 'deviceTypeCustom', 'groupId'],
+  discovery: ['ip', 'subnet', 'gateway'],
+  monitoring: ['last_status', 'last_checked'],
+}
+
+/** Discovery-owned network fields that the user may still change explicitly (override). */
+export const USER_OVERRIDABLE_FIELDS: readonly string[] = ['ip', 'subnet', 'gateway']
 
 export type LegacyUserDeviceFieldKey =
   | 'name'
@@ -83,19 +105,22 @@ function withEquipmentRuntime<T extends LegacyEquipmentMutationResult>(r: T): T 
   return r
 }
 
-/** JSON envelope for `equipment_values_json`; version allows future shape changes without guessing. */
-const EQUIPMENT_VALUES_MIRROR_VERSION = 1 as const
-
 /**
- * Write-through mirror: serializes `mapDeviceToEquipmentRuntime(device).values` into `devices.equipment_values_json`.
- * Invoke only after a successful column write, passing a `Device` from {@link getDeviceById} so the mirror matches
- * `rowToDevice` truth (join-derived `groupName`, vendor lookup, etc.). Legacy columns remain authoritative; reads
- * still use columns — this column is storage for later experiments only.
+ * Write-through mirror: serializes projection into `devices.equipment_values_json` via {@link serializeEquipmentValuesMirrorPayload}.
+ * Invoke only after a successful column write, passing a `Device` from {@link getDeviceById}. In development, re-reads the row once to verify.
  */
 function syncEquipmentValuesMirror(db: Database.Database, device: Device): void {
-  const { values } = mapDeviceToEquipmentRuntime(device)
-  const payload = { v: EQUIPMENT_VALUES_MIRROR_VERSION, values }
-  persistEquipmentValuesJsonMirror(db, device.id, JSON.stringify(payload))
+  const json = serializeEquipmentValuesMirrorPayload(device)
+  persistEquipmentValuesJsonMirror(db, device.id, json)
+  if (process.env.NODE_ENV === 'development') {
+    const row = db
+      .prepare(`SELECT equipment_values_json FROM devices WHERE id = ?`)
+      .get(device.id) as { equipment_values_json: string | null } | undefined
+    const check = compareEquipmentMirrorStoredToDevice(row?.equipment_values_json ?? null, device)
+    if (!check.match) {
+      console.warn('[equipment] equipment_values_json verify failed after write', device.id, check.reason)
+    }
+  }
 }
 
 /**
@@ -635,6 +660,28 @@ export function mutateMonitoringDeviceStatus(
   }
 }
 
+function monitoringIsoFromContext(ctx: MonitoringMutationContext): string {
+  if (ctx.source !== 'monitoring') {
+    // Defensive: callers should be compile-time restricted; runtime check keeps monitoring writes strict.
+    throw new Error('updateDeviceStatus ctx.source must be monitoring')
+  }
+  const ms = typeof ctx.timestamp === 'number' ? ctx.timestamp : Date.now()
+  return new Date(ms).toISOString()
+}
+
+/**
+ * Monitoring write API (preferred): routes the write through the mutation layer and enforces `source: 'monitoring'`.
+ * Sets `last_status` and `last_checked` only.
+ */
+export function updateDeviceStatus(
+  db: Database.Database,
+  deviceId: string,
+  status: DeviceStatus,
+  ctx: MonitoringMutationContext
+): MonitoringDeviceStatusMutationResult {
+  return mutateMonitoringDeviceStatus(db, deviceId, status, monitoringIsoFromContext(ctx))
+}
+
 /**
  * Monitoring-only bulk update (legacy `setAllDevicesStatus` semantics).
  * When `networkId` is omitted, uses the same default as the repository helper (`getStableNetworkId()`).
@@ -727,6 +774,59 @@ export function mutateMonitoringBulkStatus(
   }
 }
 
+/**
+ * Monitoring bulk write API (preferred): do NOT perform a direct bulk repository UPDATE.
+ * Fetches the bulk-scope device ids and applies {@link updateDeviceStatus} per row.
+ */
+export function setAllDevicesStatus(
+  db: Database.Database,
+  status: DeviceStatus,
+  ctx: MonitoringMutationContext,
+  networkId?: string | null
+): MonitoringBulkStatusMutationResult {
+  const updatedAt = new Date().toISOString()
+  const emptyBase: MonitoringBulkStatusMutationResult = {
+    success: true,
+    source: 'monitoring',
+    appliedPatches: [],
+    rejectedPatches: [],
+    errors: [],
+    warnings: [],
+    updatedAt,
+    rowsChanged: 0,
+    networkScope: null
+  }
+
+  const ids = listDeviceIdsInMonitoringBulkScope(db, networkId)
+  const iso = monitoringIsoFromContext(ctx)
+  let rowsChanged = 0
+  for (const id of ids) {
+    const r = mutateMonitoringDeviceStatus(db, id, status, iso)
+    rowsChanged += r.rowsChanged
+  }
+
+  const resolvedScope = networkId !== undefined ? networkId : getStableNetworkId()
+  return {
+    ...emptyBase,
+    rowsChanged,
+    networkScope: resolvedScope,
+    appliedPatches: [
+      {
+        fieldKey: 'last_status',
+        operation: 'set',
+        previousSnapshot: { scope: 'bulk', networkId: resolvedScope },
+        newSnapshot: status
+      },
+      {
+        fieldKey: 'last_checked',
+        operation: 'set',
+        previousSnapshot: undefined,
+        newSnapshot: iso
+      }
+    ]
+  }
+}
+
 /** Must match `arpRepository` MAC normalization output before device sync. */
 const DISCOVERY_MAC_HEX = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/
 
@@ -767,6 +867,28 @@ function rejectInvalidDiscoveryDeviceType(t: DeviceType): RejectedEquipmentPatch
  * One ARP scan row applied to a saved device. `lookupIp` is transitional resolution only;
  * persistence uses canonical `Device.id` once matched.
  */
+export interface PartialDeviceIdentity {
+  /** Unchanged semantics: match a saved row by IP only (see {@link mutateDiscoveryDeviceFromArpRow}). */
+  lookupIp: string
+}
+
+export interface PartialDeviceDiscoveryPatch {
+  normalizedMac: string
+  arpVendor: string | null
+}
+
+export interface DiscoveryWriteContext {
+  source: 'discovery'
+  /** Reserved for future consistent timestamps across discovery writes; no behavior change yet. */
+  timestamp?: number
+}
+
+function assertDiscoveryWriteContext(ctx: DiscoveryWriteContext): void {
+  if (ctx.source !== 'discovery') {
+    throw new Error('applyDiscoveryUpdate requires ctx.source === "discovery"')
+  }
+}
+
 export interface DiscoveryArpRowInput {
   lookupIp: string
   normalizedMac: string
@@ -904,26 +1026,83 @@ export function mutateDiscoveryDeviceFromArpRow(
 }
 
 /**
+ * Single mutation-service entry for ARP-driven discovery updates to saved devices.
+ * **Synchronous** so callers can invoke it inside a `better-sqlite3` transaction (same atomicity as before).
+ * Returns the post-update `Device` when a row matched and applied; otherwise `null` (including no saved device for IP).
+ */
+export function applyDiscoveryUpdate(
+  db: Database.Database,
+  identity: PartialDeviceIdentity,
+  patch: PartialDeviceDiscoveryPatch,
+  ctx: DiscoveryWriteContext
+): Device | null {
+  assertDiscoveryWriteContext(ctx)
+  void ctx.timestamp
+  const input: DiscoveryArpRowInput = {
+    lookupIp: identity.lookupIp,
+    normalizedMac: patch.normalizedMac,
+    arpVendor: patch.arpVendor
+  }
+  const r = mutateDiscoveryDeviceFromArpRow(db, input)
+  if (!r.success) {
+    return null
+  }
+  if (!r.matchedDeviceId) {
+    return null
+  }
+  return getDeviceById(db, r.matchedDeviceId)
+}
+
+/**
+ * Async wrapper for callers that require a `Promise` (e.g. IPC). Same semantics as {@link applyDiscoveryUpdate}.
+ */
+export async function applyDiscoveryUpdateAsync(
+  db: Database.Database,
+  identity: PartialDeviceIdentity,
+  patch: PartialDeviceDiscoveryPatch,
+  ctx: DiscoveryWriteContext
+): Promise<Device | null> {
+  return applyDiscoveryUpdate(db, identity, patch, ctx)
+}
+
+/**
  * `upsertArpBatch` compatibility: run discovery sync and ignore structured diagnostics.
- * Prefer `mutateDiscoveryDeviceFromArpRow` when callers need patch results.
+ * Prefer {@link applyDiscoveryUpdate} or {@link mutateDiscoveryDeviceFromArpRow} when callers need results.
  */
 export function applyDiscoverySyncFromArpRow(db: Database.Database, input: DiscoveryArpRowInput): void {
-  void mutateDiscoveryDeviceFromArpRow(db, input)
+  void applyDiscoveryUpdate(
+    db,
+    { lookupIp: input.lookupIp },
+    { normalizedMac: input.normalizedMac, arpVendor: input.arpVendor },
+    { source: 'discovery' }
+  )
 }
 
 // --- Lifecycle / hard delete (orchestration; persistence is persistDelete* in repository) ---
 //
 // No syncEquipmentValuesMirror on deletes: the `devices` row (and any future JSON mirror column) is
-// removed with the row; nothing to refresh. Tombstones are out of scope until persistence design requires them.
+// removed with the row; nothing to refresh.
 //
+// Future soft-delete: gate hard `DELETE` behind a policy check here; keep `persistDelete*` as the
+// physical remove (or add persistSoftDelete* in repository) — orchestration only in this module.
 
-/** Who authorized the destructive lifecycle operation (UI vs automated/system maintenance). */
-export type EquipmentLifecycleSource = 'user' | 'system'
+/** Call-site attribution for equipment/device hard deletes (required on every entry point). */
+export type EquipmentDeviceDeleteSource = 'user' | 'monitoring' | 'discovery'
+
+export interface EquipmentDeviceDeleteContext {
+  source: EquipmentDeviceDeleteSource
+}
+
+function assertEquipmentDeviceDeleteContext(ctx: EquipmentDeviceDeleteContext): void {
+  if (ctx.source !== 'user' && ctx.source !== 'monitoring' && ctx.source !== 'discovery') {
+    throw new Error('deleteDevice ctx.source must be user, monitoring, or discovery')
+  }
+}
 
 export interface LifecycleDeleteSingleResult {
   success: boolean
   operation: 'hard_delete_single'
-  source: EquipmentLifecycleSource
+  source: EquipmentDeviceDeleteSource
   targetId: string
   /** True when a `devices` row was removed. */
   deleted: boolean
@@ -936,7 +1115,7 @@ export interface LifecycleDeleteSingleResult {
 export interface LifecycleBulkDeleteResult {
   success: boolean
   operation: 'hard_delete_all' | 'hard_delete_network_scope'
-  source: EquipmentLifecycleSource
+  source: EquipmentDeviceDeleteSource
   deletedCount: number
   /** Set for `hard_delete_network_scope`. */
   networkId?: string
@@ -946,13 +1125,13 @@ export interface LifecycleBulkDeleteResult {
 }
 
 /**
- * Hard-delete one saved device by canonical `id`. Map layout rows for that node are removed by the
- * persistence helper (legacy behavior). Missing id → validation error; missing row → `deleted: false`.
+ * Internal hard-delete (single row). Callers should prefer {@link deleteDevice}.
+ * Map layout rows for that node are removed by the persistence helper (legacy behavior).
  */
-export function mutateLifecycleDeleteDeviceById(
+function performHardDeleteDeviceById(
   db: Database.Database,
   deviceId: string,
-  source: EquipmentLifecycleSource
+  source: EquipmentDeviceDeleteSource
 ): LifecycleDeleteSingleResult {
   const updatedAt = new Date().toISOString()
   const targetId = deviceId.trim()
@@ -993,17 +1172,34 @@ export function mutateLifecycleDeleteDeviceById(
   }
 }
 
-/** Hard-delete every device row (all networks) and all map layout state. */
-export function mutateLifecycleDeleteAllDevices(
+/**
+ * Single mutation-service entry point for deleting one saved device. Hard delete only.
+ * Future soft-delete: short-circuit here before calling {@link performHardDeleteDeviceById}.
+ */
+export async function deleteDevice(
   db: Database.Database,
-  source: EquipmentLifecycleSource
-): LifecycleBulkDeleteResult {
+  deviceId: string,
+  ctx: EquipmentDeviceDeleteContext
+): Promise<void> {
+  assertEquipmentDeviceDeleteContext(ctx)
+  const r = performHardDeleteDeviceById(db, deviceId, ctx.source)
+  if (r.errors.length > 0) {
+    throw new Error(r.errors[0])
+  }
+}
+
+/** Hard-delete every device row (all networks) and all map layout state. */
+export async function deleteAllDevices(
+  db: Database.Database,
+  ctx: EquipmentDeviceDeleteContext
+): Promise<LifecycleBulkDeleteResult> {
+  assertEquipmentDeviceDeleteContext(ctx)
   const updatedAt = new Date().toISOString()
   const deletedCount = persistDeleteAllDevices(db)
   return {
     success: true,
     operation: 'hard_delete_all',
-    source,
+    source: ctx.source,
     deletedCount,
     errors: [],
     warnings: [],
@@ -1012,18 +1208,19 @@ export function mutateLifecycleDeleteAllDevices(
 }
 
 /** Hard-delete devices tagged with the given `network_id` and map layout for that network. */
-export function mutateLifecycleDeleteDevicesForNetwork(
+export async function deleteDevicesForNetwork(
   db: Database.Database,
   networkId: string,
-  source: EquipmentLifecycleSource
-): LifecycleBulkDeleteResult {
+  ctx: EquipmentDeviceDeleteContext
+): Promise<LifecycleBulkDeleteResult> {
+  assertEquipmentDeviceDeleteContext(ctx)
   const updatedAt = new Date().toISOString()
   const nid = networkId.trim()
   if (!nid) {
     return {
       success: false,
       operation: 'hard_delete_network_scope',
-      source,
+      source: ctx.source,
       deletedCount: 0,
       errors: ['networkId is required for scoped delete.'],
       warnings: [],
@@ -1035,7 +1232,7 @@ export function mutateLifecycleDeleteDevicesForNetwork(
   return {
     success: true,
     operation: 'hard_delete_network_scope',
-    source,
+    source: ctx.source,
     deletedCount,
     networkId: nid,
     errors: [],

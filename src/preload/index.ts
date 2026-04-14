@@ -5,8 +5,11 @@ import type {
   AppSettings,
   ArpEntry,
   CreateMapManualGroupPayload,
+  DebugEquipmentRuntimeJsonHydrationIpcResult,
   Device,
   DeviceGroup,
+  EquipmentMirrorVerifyDeviceResult,
+  EquipmentMirrorVerifyScanSummary,
   MapLayoutBundle,
   MapManualGroup,
   NetworkAdapter,
@@ -39,6 +42,17 @@ const api = {
   saveDevice: (payload: SaveDevicePayload): Promise<Device> =>
     ipcRenderer.invoke(IPC.SAVE_DEVICE, payload),
   deleteDevice: (id: string): Promise<void> => ipcRenderer.invoke(IPC.DELETE_DEVICE, id),
+  /** Debug/maintenance: compare `equipment_values_json` to live projection for one device (read-only). */
+  debugVerifyEquipmentMirrorDevice: (deviceId: string): Promise<EquipmentMirrorVerifyDeviceResult> =>
+    ipcRenderer.invoke(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_DEVICE, deviceId),
+  /** Debug/maintenance: scan all device mirrors (read-only); see `failures` sample (capped). */
+  debugVerifyEquipmentMirrorScan: (): Promise<EquipmentMirrorVerifyScanSummary> =>
+    ipcRenderer.invoke(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_SCAN),
+  /** Debug/maintenance: opt-in JSON mirror hydration → projection + `readSource` (non-authoritative experiment). */
+  debugResolveEquipmentRuntimeJsonHydration: (
+    deviceId: string
+  ): Promise<DebugEquipmentRuntimeJsonHydrationIpcResult> =>
+    ipcRenderer.invoke(IPC.DEBUG_MAINTENANCE_RESOLVE_EQUIPMENT_RUNTIME_JSON_HYDRATION, deviceId),
   getDeviceGroups: (): Promise<DeviceGroup[]> => ipcRenderer.invoke(IPC.GET_DEVICE_GROUPS),
   saveDeviceGroup: (payload: SaveDeviceGroupPayload): Promise<DeviceGroup> =>
     ipcRenderer.invoke(IPC.SAVE_DEVICE_GROUP, payload),

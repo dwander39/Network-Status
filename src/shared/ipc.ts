@@ -51,5 +51,12 @@ export const IPC = {
   GET_EVENT_LOGS: 'eventLogs:get',
   ON_EVENT_LOG_ADDED: 'eventLogs:added',
   CLEAR_EVENT_LOGS: 'eventLogs:clear',
-  EXPORT_EVENT_LOGS: 'eventLogs:export'
+  EXPORT_EVENT_LOGS: 'eventLogs:export',
+  /** Debug/maintenance: mirror vs projection for one device id (read-only). */
+  DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_DEVICE: 'debug:maintenance:verifyEquipmentMirrorDevice',
+  /** Debug/maintenance: scan all device mirrors (read-only). */
+  DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_SCAN: 'debug:maintenance:verifyEquipmentMirrorScan',
+  /** Debug/maintenance: opt-in JSON-hydrated runtime projection with explicit fallback (read-only). */
+  DEBUG_MAINTENANCE_RESOLVE_EQUIPMENT_RUNTIME_JSON_HYDRATION:
+    'debug:maintenance:resolveEquipmentRuntimeJsonHydration'
 } as const

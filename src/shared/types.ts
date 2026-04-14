@@ -51,6 +51,11 @@ export interface Device {
   groupName: string | null
   /** LAN fingerprint when tagged; used for alert rules / filtering. */
   networkId?: string | null
+  /**
+   * Dev main builds only (`NODE_ENV === 'development'`): persisted equipment mirror JSON for diagnostics.
+   * Omitted in production IPC. Never authoritative — columns remain source of truth.
+   */
+  equipmentValuesJson?: string | null
 }
 
 export interface ArpEntry {
@@ -409,6 +414,66 @@ export interface AppSettings {
   arpSubnetSweep: boolean
   /** Global overrides for built-in `EventType` → severity; empty object = use built-in mapping only. */
   eventLogSeverityOverrides: EventLogSeverityOverrides
+}
+
+/**
+ * Debug/maintenance only: compare `devices.equipment_values_json` to `mapDeviceToEquipmentRuntime(device)`.
+ * Exposed via IPC for DevTools / on-demand checks; not used in normal UI flows.
+ */
+/**
+ * Opt-in JSON mirror hydration experiment (debug/maintenance): which path produced the projection.
+ * `device_columns` = fallback from authoritative `Device`; `json_mirror_experiment` = validated mirror only.
+ */
+export type EquipmentRuntimeReadSource = 'device_columns' | 'json_mirror_experiment'
+
+/** IPC-serializable projection payload for {@link DebugEquipmentRuntimeJsonHydrationIpcResult} (maintenance only). */
+export interface EquipmentRuntimeProjectionIpcShape {
+  id: string
+  values: Record<string, unknown>
+  _projection: { source: 'legacy_device_row' | 'json_mirror_experiment'; phase: 1 }
+}
+
+/** Debug IPC: resolve runtime projection with JSON hydration attempt + explicit fallback (read-only). */
+export type DebugEquipmentRuntimeJsonHydrationIpcResult =
+  | { ok: false; deviceId: string; reason: string }
+  | {
+      ok: true
+      deviceId: string
+      readSource: EquipmentRuntimeReadSource
+      projection: EquipmentRuntimeProjectionIpcShape
+    }
+
+/** Guarded JSON-read experiment (maintenance only): parse mirror + compare parsed `values` to live projection. */
+export interface EquipmentMirrorJsonReadExperiment {
+  mirrorParseOk: boolean
+  parseFailureReason?: string
+  mirrorVersion?: number
+  /**
+   * Parsed mirror `values` vs `mapDeviceToEquipmentRuntime(device).values` (canonical JSON compare).
+   * Always false if parse failed or `device` was unavailable for comparison.
+   */
+  parsedValuesMatchLiveProjection: boolean
+}
+
+export interface EquipmentMirrorVerifyDeviceResult {
+  deviceId: string
+  ok: boolean
+  reason?: string
+  /** Secondary: structured parse/compare; authoritative check remains string `ok` vs live serialize. */
+  jsonReadExperiment?: EquipmentMirrorJsonReadExperiment
+}
+
+/** Debug/maintenance: full-table mirror scan summary (`verifyEquipmentMirrorScan` IPC). */
+export interface EquipmentMirrorVerifyScanSummary {
+  total: number
+  ok: number
+  missingOrEmpty: number
+  invalid: number
+  mismatch: number
+  /** e.g. `device_not_found`, `row_not_found`, `device_id_required` */
+  other: number
+  /** Sample of failing rows (capped) for quick inspection. */
+  failures: { deviceId: string; reason?: string }[]
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

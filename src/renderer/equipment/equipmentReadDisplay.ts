@@ -8,7 +8,7 @@
  * (read-only metadata from `LEGACY_DEVICE_FIELD_DEFINITIONS`; values still from resolved read).
  */
 
-import type { Device, DeviceType } from '@shared/types'
+import type { Device, DeviceType, EquipmentRuntimeReadSource } from '@shared/types'
 import { getDeviceTypeDisplayLabel } from '@shared/deviceTypeDisplay'
 import { showDeviceTypeCustomField } from '@shared/deviceSaveValidation'
 import {
@@ -16,6 +16,7 @@ import {
   type EquipmentRuntimeProjection,
   type LegacyDeviceScopedValues
 } from '../../domain/equipment/deviceEquipmentAdapter'
+import { resolveEquipmentRuntimeProjectionWithJsonHydrationExperiment } from '../../domain/equipment/equipmentValuesMirror'
 import { getLegacyDeviceFieldDefinition } from '../../domain/equipment/legacyDeviceFieldDefinitions'
 import {
   getLegacyProjectionFieldValue,
@@ -160,6 +161,30 @@ export function resolveMapInspectorStaticReadModel(device: Device): MapInspector
   return {
     runtime,
     fields: buildStaticResolvedFields(values, device)
+  }
+}
+
+/**
+ * **Experimental / opt-in:** same resolved fields as {@link resolveMapInspectorStaticReadModel}, but `runtime` may be
+ * hydrated from `equipment_values_json` when valid; otherwise falls back to columns. Caller must pass mirror text explicitly.
+ * Does not run on default inspector paths.
+ */
+export interface MapInspectorStaticResolvedReadWithJsonHydrationExperiment extends MapInspectorStaticResolvedRead {
+  readSource: EquipmentRuntimeReadSource
+}
+
+export function resolveMapInspectorStaticReadModelWithJsonHydrationExperiment(
+  device: Device,
+  storedEquipmentValuesJson: string | null | undefined
+): MapInspectorStaticResolvedReadWithJsonHydrationExperiment {
+  const { projection, readSource } = resolveEquipmentRuntimeProjectionWithJsonHydrationExperiment(
+    device,
+    storedEquipmentValuesJson
+  )
+  return {
+    runtime: projection,
+    fields: buildStaticResolvedFields(projection.values, device),
+    readSource
   }
 }
 

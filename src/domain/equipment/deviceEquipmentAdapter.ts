@@ -39,12 +39,16 @@ export type LegacyDeviceScopedValues = Record<LegacyDeviceRuntimeValueKey, Equip
 /**
  * Runtime Equipment-shaped view derived from `Device`. Not persisted; not the full domain
  * `Equipment` entity (no `projectId`, audit ids, or `typeKey` until those exist on the row).
+ *
+ * `_projection.source`: `legacy_device_row` = authoritative columns; `json_mirror_experiment` = opt-in JSON mirror hydration (non-authoritative experiment).
  */
+export type EquipmentRuntimeProjectionSource = 'legacy_device_row' | 'json_mirror_experiment'
+
 export interface EquipmentRuntimeProjection {
   id: string
   values: LegacyDeviceScopedValues
   /** Documents adapter provenance for debugging and future migrations. */
-  _projection: { source: 'legacy_device_row'; phase: 1 }
+  _projection: { source: EquipmentRuntimeProjectionSource; phase: 1 }
 }
 
 /**

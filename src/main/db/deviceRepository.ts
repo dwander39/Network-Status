@@ -1,6 +1,19 @@
 import type Database from 'better-sqlite3'
 import { v4 as uuidv4 } from 'uuid'
-import type { Device, DeviceStatus, DeviceType } from '@shared/types'
+import type {
+  DebugEquipmentRuntimeJsonHydrationIpcResult,
+  Device,
+  DeviceStatus,
+  DeviceType,
+  EquipmentMirrorVerifyDeviceResult,
+  EquipmentMirrorVerifyScanSummary
+} from '@shared/types'
+import {
+  compareEquipmentMirrorStoredToDevice,
+  resolveEquipmentRuntimeProjectionWithJsonHydrationExperiment,
+  runEquipmentMirrorJsonReadExperiment,
+  serializeEquipmentValuesMirrorPayload
+} from '../../domain/equipment/equipmentValuesMirror'
 import { lookupVendor } from '../services/vendorLookup'
 import { inferDeviceType } from '../services/deviceFingerprint'
 import { normalizeDeviceTypeCustom } from '@shared/deviceTypeDisplay'
@@ -11,6 +24,9 @@ import {
   deleteMapLayoutRowsForNodeKey
 } from './mapLayoutRepository'
 
+/** Include mirror column only in dev — avoids shipping large JSON over IPC in production. */
+const INCLUDE_DEV_EQUIPMENT_MIRROR_JSON = process.env.NODE_ENV === 'development'
+
 function rowToDevice(row: Record<string, unknown>): Device {
   const mac = row.mac_address != null ? String(row.mac_address) : null
   const storedVendor = row.vendor != null ? String(row.vendor) : null
@@ -20,7 +36,7 @@ function rowToDevice(row: Record<string, unknown>): Device {
     row.device_type_custom != null && String(row.device_type_custom).trim()
       ? normalizeDeviceTypeCustom(String(row.device_type_custom))
       : null
-  return {
+  const base: Device = {
     id: String(row.id),
     name: String(row.name),
     ip: String(row.ip),
@@ -36,14 +52,30 @@ function rowToDevice(row: Record<string, unknown>): Device {
     groupName: row.group_name != null ? String(row.group_name) : null,
     networkId: row.network_id != null ? String(row.network_id) : null
   }
+  if (INCLUDE_DEV_EQUIPMENT_MIRROR_JSON && 'equipment_values_json' in row) {
+    const j = row.equipment_values_json
+    const s = j != null ? String(j) : ''
+    base.equipmentValuesJson = s.trim() !== '' ? s : null
+  }
+  return base
 }
 
-const deviceSelect = `
+const deviceSelectBase = `
   SELECT d.id, d.name, d.ip, d.subnet, d.gateway, d.mac_address, d.vendor, d.device_type, d.device_type_custom,
          d.last_status, d.last_checked, d.group_id, d.network_id, g.name AS group_name
   FROM devices d
   LEFT JOIN device_groups g ON g.id = d.group_id
 `
+
+const deviceSelect = INCLUDE_DEV_EQUIPMENT_MIRROR_JSON
+  ? `
+  SELECT d.id, d.name, d.ip, d.subnet, d.gateway, d.mac_address, d.vendor, d.device_type, d.device_type_custom,
+         d.last_status, d.last_checked, d.group_id, d.network_id, g.name AS group_name,
+         d.equipment_values_json
+  FROM devices d
+  LEFT JOIN device_groups g ON g.id = d.group_id
+`
+  : deviceSelectBase
 
 /**
  * Lists devices for the UI. When `networkId` is set, shows rows tagged for that LAN
@@ -259,4 +291,137 @@ export function listDeviceIdsInMonitoringBulkScope(
     .prepare(`SELECT id FROM devices WHERE network_id IS NULL OR network_id = ?`)
     .all(nid) as { id: string }[]
   return rows.map((r) => String(r.id))
+}
+
+/**
+ * One-time / startup: fill `equipment_values_json` from authoritative `Device` where missing or blank.
+ * Does not overwrite non-empty mirrors (avoids fighting concurrent writers).
+ */
+export function backfillMissingEquipmentValuesJsonMirrors(db: Database.Database): number {
+  const ids = db
+    .prepare(
+      `SELECT id FROM devices WHERE equipment_values_json IS NULL OR TRIM(COALESCE(equipment_values_json, '')) = ''`
+    )
+    .all() as { id: string }[]
+  let n = 0
+  for (const { id } of ids) {
+    const d = getDeviceById(db, id)
+    if (!d) continue
+    persistEquipmentValuesJsonMirror(db, id, serializeEquipmentValuesMirrorPayload(d))
+    n += 1
+  }
+  return n
+}
+
+const MIRROR_SCAN_FAILURE_CAP = 80
+
+/**
+ * Debug/maintenance: opt-in JSON hydration experiment for one device (read-only). Returns which source was used;
+ * columns remain authoritative on mismatch (fallback projection).
+ */
+export function debugResolveEquipmentRuntimeProjectionWithJsonHydration(
+  db: Database.Database,
+  deviceId: string
+): DebugEquipmentRuntimeJsonHydrationIpcResult {
+  const id = deviceId.trim()
+  if (!id) return { ok: false, deviceId: id, reason: 'device_id_required' }
+
+  const device = getDeviceById(db, id)
+  if (!device) return { ok: false, deviceId: id, reason: 'device_not_found' }
+
+  const row = db
+    .prepare(`SELECT equipment_values_json FROM devices WHERE id = ?`)
+    .get(id) as { equipment_values_json: string | null } | undefined
+
+  const { projection, readSource } = resolveEquipmentRuntimeProjectionWithJsonHydrationExperiment(
+    device,
+    row?.equipment_values_json ?? null
+  )
+
+  return {
+    ok: true,
+    deviceId: id,
+    readSource,
+    projection: {
+      id: projection.id,
+      values: projection.values as unknown as Record<string, unknown>,
+      _projection: projection._projection
+    }
+  }
+}
+
+/** Maintenance / diagnostics: compare stored mirror to fresh projection for one device (read-only). */
+export function verifyEquipmentValuesMirrorRow(
+  db: Database.Database,
+  deviceId: string
+): EquipmentMirrorVerifyDeviceResult {
+  const id = deviceId.trim()
+  if (!id) return { deviceId: id, ok: false, reason: 'device_id_required' }
+
+  const row = db
+    .prepare(`SELECT equipment_values_json FROM devices WHERE id = ?`)
+    .get(id) as { equipment_values_json: string | null } | undefined
+  const device = getDeviceById(db, id)
+
+  if (!device) {
+    return {
+      deviceId: id,
+      ok: false,
+      reason: 'device_not_found',
+      jsonReadExperiment: runEquipmentMirrorJsonReadExperiment(row?.equipment_values_json ?? null, null)
+    }
+  }
+  if (!row) {
+    return {
+      deviceId: id,
+      ok: false,
+      reason: 'row_not_found',
+      jsonReadExperiment: runEquipmentMirrorJsonReadExperiment(null, device)
+    }
+  }
+
+  const r = compareEquipmentMirrorStoredToDevice(row.equipment_values_json, device)
+  return {
+    deviceId: id,
+    ok: r.match,
+    reason: r.reason,
+    jsonReadExperiment: runEquipmentMirrorJsonReadExperiment(row.equipment_values_json, device)
+  }
+}
+
+/** Maintenance: verify every device row’s mirror (read-only). */
+export function verifyAllEquipmentValuesMirrorRows(db: Database.Database): EquipmentMirrorVerifyScanSummary {
+  const ids = db.prepare(`SELECT id FROM devices`).all() as { id: string }[]
+  const failures: { deviceId: string; reason?: string }[] = []
+  let ok = 0
+  let missingOrEmpty = 0
+  let invalid = 0
+  let mismatch = 0
+  let other = 0
+
+  for (const { id } of ids) {
+    const r = verifyEquipmentValuesMirrorRow(db, id)
+    if (r.ok) {
+      ok += 1
+      continue
+    }
+    if (failures.length < MIRROR_SCAN_FAILURE_CAP) {
+      failures.push({ deviceId: r.deviceId, reason: r.reason })
+    }
+    const reason = r.reason
+    if (reason === 'missing_or_empty_mirror') missingOrEmpty += 1
+    else if (reason === 'invalid_json' || reason === 'malformed_mirror_shape') invalid += 1
+    else if (reason === 'payload_mismatch') mismatch += 1
+    else other += 1
+  }
+
+  return {
+    total: ids.length,
+    ok,
+    missingOrEmpty,
+    invalid,
+    mismatch,
+    other,
+    failures
+  }
 }
