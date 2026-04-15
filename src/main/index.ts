@@ -111,6 +111,10 @@ let schedulerRestartTimer: NodeJS.Timeout | null = null
 const ignoredNewNetworkIds = new Set<string>()
 let eventLogs: EventLogService | null = null
 
+// Secondary window (hardcoded single-instance placeholder).
+let isMapWindowOpen = false
+let mapWindow: BrowserWindow | null = null
+
 /**
  * Use the latest sampled context for UI filtering (fast), falling back to debounced stable id.
  * This prevents lists from getting "stuck" on the previous LAN during Wi‑Fi switches.
@@ -138,16 +142,23 @@ function networkInfoPayload(): NetworkInfo | null {
 }
 
 function pushNetworkProfilesToRenderer(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  mainWindow.webContents.send(
-    IPC.ON_NETWORK_PROFILES_CHANGED,
-    listNetworkProfiles(getDatabase(), uiNetworkId())
-  )
+  const payload = listNetworkProfiles(getDatabase(), uiNetworkId())
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.ON_NETWORK_PROFILES_CHANGED, payload)
+  }
+  if (mapWindow && !mapWindow.isDestroyed()) {
+    mapWindow.webContents.send(IPC.ON_NETWORK_PROFILES_CHANGED, payload)
+  }
 }
 
 function pushNetworkInfoUpdated(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  mainWindow.webContents.send(IPC.ON_NETWORK_INFO_UPDATED, networkInfoPayload())
+  const payload = networkInfoPayload()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.ON_NETWORK_INFO_UPDATED, payload)
+  }
+  if (mapWindow && !mapWindow.isDestroyed()) {
+    mapWindow.webContents.send(IPC.ON_NETWORK_INFO_UPDATED, payload)
+  }
 }
 
 function pushAlertRulesToRenderer(): void {
@@ -286,21 +297,82 @@ function refreshTray(): void {
 }
 
 function pushArpToRenderer(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
   const db = getDatabase()
   const nid = uiNetworkId()
-  mainWindow.webContents.send(IPC.ON_ARP_CHANGED, {
+  const payload = {
     entries: listArpEntries(db, nid),
     discovered: listDiscoveredDevices(db, nid)
-  })
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.ON_ARP_CHANGED, payload)
+  }
+  if (mapWindow && !mapWindow.isDestroyed()) {
+    mapWindow.webContents.send(IPC.ON_ARP_CHANGED, payload)
+  }
 }
 
 function pushDeviceGroupsToRenderer(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  mainWindow.webContents.send(IPC.ON_DEVICE_GROUPS_CHANGED, listDeviceGroups(getDatabase()))
+  const payload = listDeviceGroups(getDatabase())
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.ON_DEVICE_GROUPS_CHANGED, payload)
+  }
+  if (mapWindow && !mapWindow.isDestroyed()) {
+    mapWindow.webContents.send(IPC.ON_DEVICE_GROUPS_CHANGED, payload)
+  }
 }
 
 function registerIpc(): void {
+  ipcMain.handle(IPC.OPEN_MAP_VIEW_WINDOW, async () => {
+    if (mapWindow && mapWindow.isDestroyed()) {
+      mapWindow = null
+      isMapWindowOpen = false
+    }
+    if (isMapWindowOpen) return
+    try {
+      const bounds = mainWindow?.getBounds()
+      const w = new BrowserWindow({
+        width: 720,
+        height: 480,
+        title: 'Map View',
+        ...(bounds
+          ? {
+              x: bounds.x + 40,
+              y: bounds.y + 40
+            }
+          : {}),
+        webPreferences: {
+          preload: join(__dirname, '../preload/index.js'),
+          contextIsolation: true
+        }
+      })
+      mapWindow = w
+      isMapWindowOpen = true
+      w.on('closed', () => {
+        mapWindow = null
+        isMapWindowOpen = false
+      })
+
+      const url = devRendererUrl()
+      if (url) await w.loadURL(`${url}#map-window`)
+      else await w.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'map-window' })
+    } catch {
+      mapWindow = null
+      isMapWindowOpen = false
+    }
+  })
+
+  ipcMain.handle(IPC.FOCUS_MAP_VIEW_WINDOW_IF_OPEN, () => {
+    if (mapWindow && mapWindow.isDestroyed()) {
+      mapWindow = null
+      isMapWindowOpen = false
+    }
+    if (mapWindow && !mapWindow.isDestroyed()) {
+      mapWindow.focus()
+      return true
+    }
+    return false
+  })
+
   ipcMain.handle(IPC.FOCUS_BROWSER_WINDOW_FOR_KEYBOARD, (_e, context?: string) => {
     focusBrowserWindowForKeyboardFromMain(typeof context === 'string' ? context : 'unknown')
   })
@@ -607,8 +679,9 @@ function registerIpc(): void {
     })
   })
 
-  ipcMain.handle(IPC.SHOW_MAP_NODE_CONTEXT_MENU, (_e, payload: ShowMapNodeContextMenuPayload) => {
-    if (!mainWindow) return
+  ipcMain.handle(IPC.SHOW_MAP_NODE_CONTEXT_MENU, (e, payload: ShowMapNodeContextMenuPayload) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win.isDestroyed()) return
     const x = Math.round(payload.x)
     const y = Math.round(payload.y)
     if (payload.target.kind === 'manualGroup') {
@@ -621,37 +694,55 @@ function registerIpc(): void {
           click: () => {
             const nextLocked = !locked
             setManualGroupContentsLocked(getDatabase(), { id: gid, locked: nextLocked })
-            mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, {
+            const payload = {
               id: gid,
               locked: nextLocked
-            })
+            }
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, payload)
+            }
+            if (mapWindow && !mapWindow.isDestroyed()) {
+              mapWindow.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, payload)
+            }
           }
         },
         { type: 'separator' },
         {
           label: 'Auto size',
           click: () => {
-            mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, {
+            const payload = {
               action: 'autoSize',
               groupId: gid
-            })
+            }
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, payload)
+            }
+            if (mapWindow && !mapWindow.isDestroyed()) {
+              mapWindow.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, payload)
+            }
           }
         },
         {
           label: 'Auto align',
           click: () => {
-            mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, {
+            const payload = {
               action: 'autoAlign',
               groupId: gid
-            })
+            }
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, payload)
+            }
+            if (mapWindow && !mapWindow.isDestroyed()) {
+              mapWindow.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, payload)
+            }
           }
         }
       ])
-      menu.popup({ window: mainWindow, x, y })
+      menu.popup({ window: win, x, y })
       return
     }
     const menu = Menu.buildFromTemplate([{ label: 'Device actions (coming soon)', enabled: false }])
-    menu.popup({ window: mainWindow, x, y })
+    menu.popup({ window: win, x, y })
   })
 
   ipcMain.handle(IPC.RESET_MAP_LAYOUT, (_e, networkId: string) => {
@@ -682,19 +773,25 @@ function registerIpc(): void {
   ipcMain.handle(IPC.DELETE_DEVICE_GROUP, (_e, id: string) => {
     deleteDeviceGroup(getDatabase(), id)
     pushDeviceGroupsToRenderer()
-    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
+    const payload = listDevices(getDatabase(), uiNetworkId())
+    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, payload)
+    mapWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, payload)
   })
 
   ipcMain.handle(IPC.SET_DEVICE_GROUP, (_e, deviceId: string, groupId: string | null) => {
     const d = applyUserSetDeviceGroup(getDatabase(), deviceId, groupId)
-    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
+    const payload = listDevices(getDatabase(), uiNetworkId())
+    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, payload)
+    mapWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, payload)
     refreshTray()
     return d
   })
 
   ipcMain.handle(IPC.SAVE_DEVICE, (_e, payload: SaveDevicePayload) => {
     const d = applyUserSaveDevicePayload(getDatabase(), payload)
-    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
+    const next = listDevices(getDatabase(), uiNetworkId())
+    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, next)
+    mapWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, next)
     pushArpToRenderer()
     refreshTray()
     return d
@@ -702,7 +799,9 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.DELETE_DEVICE, async (_e, id: string) => {
     await deleteDevice(getDatabase(), id, { source: 'user' })
-    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
+    const next = listDevices(getDatabase(), uiNetworkId())
+    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, next)
+    mapWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, next)
     pushArpToRenderer()
     refreshTray()
   })
@@ -759,7 +858,10 @@ function registerIpc(): void {
       discovered
     }
     mainWindow?.webContents.send(IPC.ON_ARP_CHANGED, payload)
-    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(db, nid))
+    mapWindow?.webContents.send(IPC.ON_ARP_CHANGED, payload)
+    const devicesPayload = listDevices(db, nid)
+    mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, devicesPayload)
+    mapWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, devicesPayload)
     return payload
   })
 
@@ -772,7 +874,8 @@ function registerIpc(): void {
     schedulerRestartTimer = setTimeout(() => {
       scheduler?.stop()
       scheduler = startScheduler(getDatabase(), mainWindow, {
-        onDevicesUpdated: refreshTray
+        onDevicesUpdated: refreshTray,
+        getSecondaryWindow: () => mapWindow
       })
       schedulerRestartTimer = null
     }, 250)
@@ -810,7 +913,8 @@ if (!gotLock) {
     tray = createTray(mainWindow!, traySummary)
     scheduler = startScheduler(getDatabase(), mainWindow, {
       onDevicesUpdated: refreshTray,
-      eventLogs: eventLogs ?? undefined
+      eventLogs: eventLogs ?? undefined,
+      getSecondaryWindow: () => mapWindow
     })
     networkWatch = startNetworkWatch({
       intervalMs: 12_000,
@@ -828,16 +932,22 @@ if (!gotLock) {
         scheduler?.stop()
         scheduler = startScheduler(getDatabase(), mainWindow, {
           onDevicesUpdated: refreshTray,
-          eventLogs: eventLogs ?? undefined
+          eventLogs: eventLogs ?? undefined,
+          getSecondaryWindow: () => mapWindow
         })
         const info = networkInfoPayload()
         if (!mainWindow || mainWindow.isDestroyed()) return
         if (info) mainWindow.webContents.send(IPC.ON_NETWORK_CHANGED, info)
-        mainWindow.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
-        mainWindow.webContents.send(IPC.ON_ARP_CHANGED, {
+        mapWindow?.webContents.send(IPC.ON_NETWORK_CHANGED, info)
+        const devicesPayload = listDevices(getDatabase(), uiNetworkId())
+        mainWindow.webContents.send(IPC.ON_DEVICES_CHANGED, devicesPayload)
+        mapWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, devicesPayload)
+        const arpPayload = {
           entries: listArpEntries(getDatabase(), uiNetworkId()),
           discovered: listDiscoveredDevices(getDatabase(), uiNetworkId())
-        })
+        }
+        mainWindow.webContents.send(IPC.ON_ARP_CHANGED, arpPayload)
+        mapWindow?.webContents.send(IPC.ON_ARP_CHANGED, arpPayload)
         refreshTray()
 
         eventLogs?.log({

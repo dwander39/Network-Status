@@ -58,7 +58,12 @@ export interface SchedulerHandles {
 export function startScheduler(
   db: Database.Database,
   win: BrowserWindow | null,
-  options?: { onDevicesUpdated?: () => void; eventLogs?: EventLogService }
+  options?: {
+    onDevicesUpdated?: () => void
+    eventLogs?: EventLogService
+    /** Hardcoded secondary surface for the Map pop-out window (no generic multi-window system). */
+    getSecondaryWindow?: () => BrowserWindow | null
+  }
 ): SchedulerHandles {
   let pingTimer: ReturnType<typeof setInterval> | null = null
   let arpTimer: ReturnType<typeof setInterval> | null = null
@@ -68,15 +73,24 @@ export function startScheduler(
     if (!win || win.isDestroyed()) return
     const nid = getLastNetworkContext()?.networkId ?? getStableNetworkId()
     win.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(db, nid))
+    const w2 = options?.getSecondaryWindow?.()
+    if (w2 && !w2.isDestroyed() && w2 !== win) {
+      w2.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(db, nid))
+    }
   }
 
   const pushArp = (): void => {
     if (!win || win.isDestroyed()) return
     const nid = getLastNetworkContext()?.networkId ?? getStableNetworkId()
-    win.webContents.send(IPC.ON_ARP_CHANGED, {
+    const payload = {
       entries: listArpEntries(db, nid),
       discovered: listDiscoveredDevices(db, nid)
-    })
+    }
+    win.webContents.send(IPC.ON_ARP_CHANGED, payload)
+    const w2 = options?.getSecondaryWindow?.()
+    if (w2 && !w2.isDestroyed() && w2 !== win) {
+      w2.webContents.send(IPC.ON_ARP_CHANGED, payload)
+    }
   }
 
   let lastPingErrorAt = 0

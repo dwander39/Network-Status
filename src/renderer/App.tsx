@@ -58,6 +58,7 @@ function sortDevices(
 export function App(): JSX.Element {
   const { confirmAction } = useConfirmAction()
   const api = window.ssApi
+  const isMapWindow = window.location.hash === '#map-window'
   const [devices, setDevices] = useState<Device[]>([])
   const [groups, setGroups] = useState<DeviceGroup[]>([])
   const [discovered, setDiscovered] = useState<ArpEntry[]>([])
@@ -213,6 +214,23 @@ export function App(): JSX.Element {
     return <div className="app muted">Loading…</div>
   }
 
+  if (isMapWindow) {
+    return (
+      <div className="app app--map-view">
+        <Suspense fallback={<p className="muted">Loading map…</p>}>
+          <MapView
+            devices={filtered}
+            networkInfo={networkInfo}
+            deviceGroups={groups}
+            onSaveDevice={async (payload) => {
+              await api.saveDevice(payload)
+            }}
+          />
+        </Suspense>
+      </div>
+    )
+  }
+
   return (
     <div className={`app${mainView === 'map' ? ' app--map-view' : ''}`}>
       <h1>Network devices</h1>
@@ -234,7 +252,12 @@ export function App(): JSX.Element {
             mainView === 'map' ? 'settings-submenu__tab settings-submenu__tab--active' : 'settings-submenu__tab'
           }
           aria-current={mainView === 'map' ? 'page' : undefined}
-          onClick={() => setMainView('map')}
+          onClick={() => {
+            void api.focusMapViewWindowIfOpen().then((focused) => {
+              if (focused) return
+              setMainView('map')
+            })
+          }}
         >
           Map view
         </button>
@@ -276,6 +299,9 @@ export function App(): JSX.Element {
           }}
         >
           Add device
+        </button>
+        <button type="button" onClick={() => void api.openMapViewWindow()}>
+          Open Map View Window
         </button>
         {mainView === 'list' ? (
           <>

@@ -58,5 +58,9 @@ export const IPC = {
   DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_SCAN: 'debug:maintenance:verifyEquipmentMirrorScan',
   /** Debug/maintenance: opt-in JSON-hydrated runtime projection with explicit fallback (read-only). */
   DEBUG_MAINTENANCE_RESOLVE_EQUIPMENT_RUNTIME_JSON_HYDRATION:
-    'debug:maintenance:resolveEquipmentRuntimeJsonHydration'
+    'debug:maintenance:resolveEquipmentRuntimeJsonHydration',
+  /** UI: open one secondary native window (hardcoded placeholder). */
+  OPEN_MAP_VIEW_WINDOW: 'ui:openMapViewWindow',
+  /** UI: focus the existing Map pop-out window if open (Map-surface ownership). */
+  FOCUS_MAP_VIEW_WINDOW_IF_OPEN: 'ui:focusMapViewWindowIfOpen'
 } as const

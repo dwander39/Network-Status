@@ -42,6 +42,8 @@ const api = {
   saveDevice: (payload: SaveDevicePayload): Promise<Device> =>
     ipcRenderer.invoke(IPC.SAVE_DEVICE, payload),
   deleteDevice: (id: string): Promise<void> => ipcRenderer.invoke(IPC.DELETE_DEVICE, id),
+  openMapViewWindow: (): Promise<void> => ipcRenderer.invoke(IPC.OPEN_MAP_VIEW_WINDOW),
+  focusMapViewWindowIfOpen: (): Promise<boolean> => ipcRenderer.invoke(IPC.FOCUS_MAP_VIEW_WINDOW_IF_OPEN),
   /** Debug/maintenance: compare `equipment_values_json` to live projection for one device (read-only). */
   debugVerifyEquipmentMirrorDevice: (deviceId: string): Promise<EquipmentMirrorVerifyDeviceResult> =>
     ipcRenderer.invoke(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_DEVICE, deviceId),
