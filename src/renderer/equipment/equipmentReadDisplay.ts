@@ -39,7 +39,8 @@ function displayFromProjectedValue(
   if (v.type === 'json' && v.value === null) return emptyLabel
   switch (v.type) {
     case 'text':
-      return v.value.trim() !== '' ? v.value : emptyLabel
+      // Phase-1 read contract: empty string is meaningful and must not be treated as absence.
+      return v.value
     case 'enum':
       return v.value
     case 'datetime': {
@@ -84,12 +85,13 @@ function simpleLegacyInspectorField(key: SimpleLegacyInspectorKey, values: Legac
   return rf(key, { raw, displayValue: displayFromProjectedValue(raw), isVisible: true })
 }
 
-function effectiveDeviceType(values: LegacyDeviceScopedValues, device: Device): DeviceType {
-  return values.deviceType.type === 'enum' ? (values.deviceType.value as DeviceType) : device.deviceType
+function projectionDeviceType(values: LegacyDeviceScopedValues): DeviceType {
+  // Phase-1 resolved read contract: projection is authoritative; do not fall back to legacy `Device`.
+  return values.deviceType.type === 'enum' ? (values.deviceType.value as DeviceType) : 'Unknown'
 }
 
-function resolveTypeRowDisplay(values: LegacyDeviceScopedValues, device: Device): string {
-  const deviceType = effectiveDeviceType(values, device)
+function resolveTypeRowDisplay(values: LegacyDeviceScopedValues): string {
+  const deviceType = projectionDeviceType(values)
   const customFromProjection =
     values.deviceTypeCustom.type === 'text' && values.deviceTypeCustom.value.trim() !== ''
       ? values.deviceTypeCustom.value.trim()
@@ -97,8 +99,8 @@ function resolveTypeRowDisplay(values: LegacyDeviceScopedValues, device: Device)
   return getDeviceTypeDisplayLabel({ deviceType, deviceTypeCustom: customFromProjection })
 }
 
-function resolveCustomTypeRowVisible(values: LegacyDeviceScopedValues, device: Device): boolean {
-  const deviceType = effectiveDeviceType(values, device)
+function resolveCustomTypeRowVisible(values: LegacyDeviceScopedValues): boolean {
+  const deviceType = projectionDeviceType(values)
   const deviceTypeCustom =
     values.deviceTypeCustom.type === 'text' ? values.deviceTypeCustom.value : null
   return showDeviceTypeCustomField({ deviceType, deviceTypeCustom })
@@ -109,11 +111,10 @@ function resolveCustomTypeRowDisplay(values: LegacyDeviceScopedValues): string {
 }
 
 function buildStaticResolvedFields(
-  values: LegacyDeviceScopedValues,
-  device: Device
+  values: LegacyDeviceScopedValues
 ): MapInspectorStaticResolvedFields {
-  const typeDisplay = resolveTypeRowDisplay(values, device)
-  const customVisible = resolveCustomTypeRowVisible(values, device)
+  const typeDisplay = resolveTypeRowDisplay(values)
+  const customVisible = resolveCustomTypeRowVisible(values)
   const customDisplay = resolveCustomTypeRowDisplay(values)
   const deviceTypeRaw = getLegacyProjectionFieldValue(values, 'deviceType')
   const deviceTypeCustomRaw = getLegacyProjectionFieldValue(values, 'deviceTypeCustom')
@@ -160,7 +161,7 @@ export function resolveMapInspectorStaticReadModel(device: Device): MapInspector
   const { values } = runtime
   return {
     runtime,
-    fields: buildStaticResolvedFields(values, device)
+    fields: buildStaticResolvedFields(values)
   }
 }
 
@@ -183,7 +184,7 @@ export function resolveMapInspectorStaticReadModelWithJsonHydrationExperiment(
   )
   return {
     runtime: projection,
-    fields: buildStaticResolvedFields(projection.values, device),
+    fields: buildStaticResolvedFields(projection.values),
     readSource
   }
 }

@@ -62,6 +62,24 @@ export const FIELD_OWNERSHIP: Record<Source, readonly string[]> = {
 /** Discovery-owned network fields that the user may still change explicitly (override). */
 export const USER_OVERRIDABLE_FIELDS: readonly string[] = ['ip', 'subnet', 'gateway']
 
+/** Flat, source-aware overlay: patch keys outside the source’s allowed set are ignored (no throws). */
+function merge<T extends Record<string, any>>(existing: T, patch: Partial<T>, source: Source): T {
+  const out = { ...existing } as T
+
+  let allowed: readonly string[]
+  if (source === 'user') {
+    allowed = FIELD_OWNERSHIP.user.concat(USER_OVERRIDABLE_FIELDS)
+  } else {
+    allowed = FIELD_OWNERSHIP[source]
+  }
+
+  for (const key of Object.keys(patch as object)) {
+    if (!allowed.includes(key)) continue
+    ;(out as Record<string, any>)[key] = (patch as Record<string, any>)[key]
+  }
+  return out
+}
+
 export type LegacyUserDeviceFieldKey =
   | 'name'
   | 'ip'
@@ -154,22 +172,67 @@ function toRejectedPatches(
   }))
 }
 
+/** Form fields for validation plus persist inputs that must follow {@link merge} for updates. */
+type SaveDeviceMergedForPersist = {
+  values: DeviceFormFieldValues
+  /** Insert: from payload resolution. Update: `merge` output `groupId` (source-filtered). */
+  persistGroupId: string | null
+}
+
 function mergePayloadForValidation(
   payload: SaveDevicePayload,
-  existing: Device | null
-): DeviceFormFieldValues {
-  const groupId =
-    payload.groupId !== undefined ? payload.groupId : (existing?.groupId ?? null)
-  const deviceTypeCustomStr =
-    payload.deviceTypeCustom !== undefined
-      ? payload.deviceTypeCustom ?? ''
-      : (existing?.deviceTypeCustom ?? '') ?? ''
-  return {
+  existing: Device | null,
+  mutationSource: EquipmentMutationSource
+): SaveDeviceMergedForPersist {
+  if (!existing) {
+    const deviceTypeCustomStr =
+      payload.deviceTypeCustom !== undefined ? payload.deviceTypeCustom ?? '' : ''
+    return {
+      values: {
+        name: payload.name,
+        ip: payload.ip,
+        subnet: payload.subnet,
+        gateway: payload.gateway,
+        deviceTypeCustom: deviceTypeCustomStr
+      },
+      persistGroupId: resolveGroupId(payload, null)
+    }
+  }
+
+  const mergeSource: Source =
+    mutationSource === 'monitoring'
+      ? 'monitoring'
+      : mutationSource === 'discovery'
+        ? 'discovery'
+        : 'user'
+
+  const patch: Partial<Record<string, any>> = {
     name: payload.name,
     ip: payload.ip,
     subnet: payload.subnet,
     gateway: payload.gateway,
-    deviceTypeCustom: deviceTypeCustomStr
+    groupId: resolveGroupId(payload, existing)
+  }
+  if (payload.deviceTypeCustom !== undefined) {
+    patch.deviceTypeCustom = payload.deviceTypeCustom
+  }
+
+  const m = merge(existing as Record<string, any>, patch, mergeSource) as Device
+
+  const deviceTypeCustomStr =
+    payload.deviceTypeCustom !== undefined
+      ? (m.deviceTypeCustom ?? '') ?? ''
+      : (existing.deviceTypeCustom ?? '') ?? ''
+
+  return {
+    values: {
+      name: m.name,
+      ip: m.ip,
+      subnet: m.subnet,
+      gateway: m.gateway,
+      deviceTypeCustom: deviceTypeCustomStr
+    },
+    persistGroupId: m.groupId
   }
 }
 
@@ -281,9 +344,9 @@ export function mutateDeviceFromSavePayload(
     }
   }
 
-  const merged = mergePayloadForValidation(payload, existing)
+  const merged = mergePayloadForValidation(payload, existing, source)
   const showCustom = showDeviceTypeCustomField(isUpdate ? existing : null)
-  const validationRejections = collectDeviceFormValidationRejections(merged, showCustom)
+  const validationRejections = collectDeviceFormValidationRejections(merged.values, showCustom)
   if (validationRejections.length > 0) {
     return {
       ...empty,
@@ -292,11 +355,11 @@ export function mutateDeviceFromSavePayload(
     }
   }
 
-  const name = merged.name.trim()
-  const ip = merged.ip.trim()
-  const subnet = merged.subnet.trim()
-  const gateway = merged.gateway.trim()
-  const nextGroupId = resolveGroupId(payload, existing)
+  const name = merged.values.name.trim()
+  const ip = merged.values.ip.trim()
+  const subnet = merged.values.subnet.trim()
+  const gateway = merged.values.gateway.trim()
+  const nextGroupId = merged.persistGroupId
 
   const groupRejection = validateGroupReference(db, nextGroupId)
   if (groupRejection) {
@@ -307,7 +370,10 @@ export function mutateDeviceFromSavePayload(
     }
   }
 
-  const custom = normalizeCustomForPersist(payload)
+  const custom =
+    isUpdate && (source === 'monitoring' || source === 'discovery')
+      ? { touch: false, value: null }
+      : normalizeCustomForPersist(payload)
 
   if (isUpdate) {
     const conflict = db

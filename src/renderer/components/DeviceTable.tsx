@@ -124,7 +124,8 @@ export function DeviceTable({
           title="Click to edit"
           onClick={() => startEditCell(d, field)}
         >
-          {d[field] || '—'}
+          {/* Phase-1 resolved read contract: empty string is meaningful; do not coerce to absence/placeholder. */}
+          {d[field]}
         </span>
       )
     }
@@ -154,7 +155,8 @@ export function DeviceTable({
 
   function groupLabel(d: Device): string {
     if (groupBy === 'subnet') return subnetGroupLabel(d)
-    if (groupBy === 'vendor') return d.vendor?.trim() ? d.vendor.trim() : 'Unknown vendor'
+    // Phase-1 resolved read contract: vendor absence is explicit (null) and should render as placeholder, not a new meaning.
+    if (groupBy === 'vendor') return d.vendor?.trim() ? d.vendor.trim() : '—'
     if (groupBy === 'deviceType') return getDeviceTypeDisplayLabel(d)
     return ''
   }

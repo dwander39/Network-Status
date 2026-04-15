@@ -52,6 +52,113 @@ export interface EquipmentRuntimeProjection {
 }
 
 /**
+ * Phase 1 — Canonical resolved read contract (stabilization prep; **definition only**).
+ *
+ * This is the **local, explicit read contract** for the legacy-backed equipment projection + inspector
+ * read behavior. It exists to remove ambiguity about:
+ * - identity vs display fields (e.g. `groupId` vs `groupName`)
+ * - value semantics (explicit absence vs empty text)
+ * - which values are projection-authoritative vs transitional/join-derived
+ *
+ * It does **not** change any read path and is intentionally narrow.
+ */
+const EQUIPMENT_RESOLVED_READ_CONTRACT_PHASE_1 = {
+  phase: 1 as const,
+  fields: {
+    /** User-facing label. Text: empty string means intentionally empty, not "missing". */
+    name: {
+      kind: 'data' as const,
+      role: 'display' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'never', emptyString: 'allowed' as const }
+    },
+    /** Network identity for the device (IPv4 string). Text: empty string means intentionally empty. */
+    ip: {
+      kind: 'data' as const,
+      role: 'identity' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'never', emptyString: 'allowed' as const }
+    },
+    /** Discovery-derived hardware id. Absent is explicit (`{ type:'json', value:null }`). */
+    macAddress: {
+      kind: 'data' as const,
+      role: 'identity' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'explicit_null', emptyString: 'never' as const }
+    },
+    /** Optional network settings. Empty string means user cleared / unset; do not coerce to absent. */
+    subnet: {
+      kind: 'data' as const,
+      role: 'data' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'never', emptyString: 'allowed' as const }
+    },
+    /** Optional network settings. Empty string means user cleared / unset; do not coerce to absent. */
+    gateway: {
+      kind: 'data' as const,
+      role: 'data' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'never', emptyString: 'allowed' as const }
+    },
+    /** Vendor is discovery/inference-derived. Absent is explicit (`null`), not empty string. */
+    vendor: {
+      kind: 'data' as const,
+      role: 'display' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'explicit_null', emptyString: 'never' as const }
+    },
+    /** Device type enum (always present). */
+    deviceType: {
+      kind: 'data' as const,
+      role: 'display' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'never' }
+    },
+    /** User override label. Empty string means "no override" in display layer; do not convert to absent. */
+    deviceTypeCustom: {
+      kind: 'data' as const,
+      role: 'display' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'never', emptyString: 'allowed' as const }
+    },
+    /** Monitoring status enum (always present). */
+    lastStatus: {
+      kind: 'data' as const,
+      role: 'data' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'never' }
+    },
+    /** Monitoring timestamp. Absent is explicit (`null`), not empty string. */
+    lastChecked: {
+      kind: 'data' as const,
+      role: 'data' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'explicit_null', emptyString: 'never' as const }
+    },
+    /**
+     * Group identity (canonical). Reference: absent is explicit (`null`), not empty string.
+     * Must not be replaced by `groupName` for identity.
+     */
+    groupId: {
+      kind: 'data' as const,
+      role: 'identity' as const,
+      authoritative: 'projection' as const,
+      valueSemantics: { absent: 'explicit_null', emptyString: 'never' as const }
+    },
+    /**
+     * Group display name (joined label). Transitional / join-derived; never an identity.
+     * Text empty string means "no group label" (e.g. null join), not an id.
+     */
+    groupName: {
+      kind: 'data' as const,
+      role: 'display' as const,
+      authoritative: 'join_derived_transitional' as const,
+      valueSemantics: { absent: 'never', emptyString: 'allowed' as const }
+    }
+  }
+} as const
+
+/**
  * Explicit absence in the projection: unknown, not discovered, or no value on the legacy row.
  * Resolver layer can treat this distinctly from `text` `value: ''` (intentional empty string).
  */
