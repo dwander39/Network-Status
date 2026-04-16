@@ -293,9 +293,42 @@ export function App(): JSX.Element {
         <button
           type="button"
           onClick={() => {
-            setFormPrefill(null)
-            setFormModalKey((k) => k + 1)
-            setFormDevice('new')
+            void (async () => {
+              try {
+                const taken = new Set(devices.map((d) => d.ip))
+                const anchor = (networkInfo?.gateway ?? networkInfo?.localIpv4 ?? '').trim()
+                let ip = ''
+                const m = anchor.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/)
+                if (m) {
+                  const pre = `${m[1]}.${m[2]}.${m[3]}`
+                  for (let last = 254; last >= 2; last--) {
+                    const c = `${pre}.${last}`
+                    if (!taken.has(c)) {
+                      ip = c
+                      break
+                    }
+                  }
+                }
+                if (!ip) {
+                  for (let last = 2; last <= 254; last++) {
+                    const c = `10.0.0.${last}`
+                    if (!taken.has(c)) {
+                      ip = c
+                      break
+                    }
+                  }
+                }
+                if (!ip) ip = '10.0.0.2'
+                await api.saveDevice({
+                  name: 'New device',
+                  ip,
+                  subnet: '',
+                  gateway: (networkInfo?.gateway ?? '').trim()
+                })
+              } catch (e) {
+                alert(e instanceof Error ? e.message : 'Could not add device')
+              }
+            })()
           }}
         >
           Add device
