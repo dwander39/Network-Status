@@ -367,6 +367,9 @@ function registerIpc(): void {
       isMapWindowOpen = false
     }
     if (mapWindow && !mapWindow.isDestroyed()) {
+      if (mapWindow.isMinimized()) {
+        mapWindow.restore()
+      }
       mapWindow.focus()
       return true
     }
