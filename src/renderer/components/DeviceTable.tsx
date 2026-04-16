@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { getDeviceTypeDisplayLabel } from '@shared/deviceTypeDisplay'
 import type { Device, DeviceGroup, DeviceStatus, SaveDevicePayload } from '@shared/types'
 import { isValidIPv4 } from '@shared/ipValidation'
@@ -19,6 +19,19 @@ interface Props {
   onDelete: (id: string) => void
   onSetDeviceGroup: (deviceId: string, groupId: string | null) => Promise<void>
   onSaveDevice: (payload: SaveDevicePayload) => Promise<void>
+  extraColumns?: string[]
+  getExtraColumnValue?: (deviceId: string, col: string) => string
+  onSetExtraColumnValue?: (deviceId: string, col: string, value: string) => void
+  onRenameExtraColumn?: (oldName: string, newName: string) => void
+  onDeleteExtraColumn?: (name: string) => void
+  getColumnWidthPx?: (key: string) => number | undefined
+  onSetColumnWidthPx?: (key: string, widthPx: number) => void
+  hiddenColumns?: Record<string, boolean>
+  /** When set and the device row is present, open inline edit on the Name cell once (e.g. after Add device). */
+  focusNameEditDeviceId?: string | null
+  onFocusNameEditHandled?: () => void
+  selectedDeviceId?: string | null
+  onSelectDevice?: (id: string) => void
 }
 
 function statusClass(s: DeviceStatus): string {
@@ -46,11 +59,58 @@ export function DeviceTable({
   onSort,
   onDelete,
   onSetDeviceGroup,
-  onSaveDevice
+  onSaveDevice,
+  extraColumns = [],
+  getExtraColumnValue,
+  onSetExtraColumnValue,
+  onRenameExtraColumn,
+  onDeleteExtraColumn,
+  getColumnWidthPx,
+  onSetColumnWidthPx,
+  hiddenColumns,
+  focusNameEditDeviceId,
+  onFocusNameEditHandled,
+  selectedDeviceId,
+  onSelectDevice
 }: Props): JSX.Element {
   const [editing, setEditing] = useState<{ id: string; field: EditableField } | null>(null)
   const [draft, setDraft] = useState('')
+  const [editingExtra, setEditingExtra] = useState<{ id: string; col: string } | null>(null)
+  const [draftExtra, setDraftExtra] = useState('')
+  const [renamingCol, setRenamingCol] = useState<string | null>(null)
+  const [draftColName, setDraftColName] = useState('')
   const [saving, setSaving] = useState(false)
+
+  const resizeRef = useRef<{ key: string; startX: number; startW: number } | null>(null)
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent): void => {
+      const r = resizeRef.current
+      if (!r) return
+      const next = Math.max(60, Math.round(r.startW + (e.clientX - r.startX)))
+      onSetColumnWidthPx?.(r.key, next)
+    }
+    const onUp = (): void => {
+      resizeRef.current = null
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [onSetColumnWidthPx])
+
+  useLayoutEffect(() => {
+    if (!focusNameEditDeviceId) return
+    const d = devices.find((x) => x.id === focusNameEditDeviceId)
+    if (!d) return
+    const row = document.querySelector(`[data-device-row="${d.id}"]`)
+    row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    setEditing({ id: d.id, field: 'name' })
+    setDraft(String(d.name ?? ''))
+    onFocusNameEditHandled?.()
+  }, [focusNameEditDeviceId, devices, onFocusNameEditHandled])
 
   const label = (k: SortKey, text: string): string =>
     sortKey === k ? `${text} ${sortDir === 'asc' ? '▲' : '▼'}` : text
@@ -69,6 +129,10 @@ export function DeviceTable({
   function cancelEdit(): void {
     setEditing(null)
     setDraft('')
+    setEditingExtra(null)
+    setDraftExtra('')
+    setRenamingCol(null)
+    setDraftColName('')
   }
 
   async function commitEdit(): Promise<void> {
@@ -147,6 +211,50 @@ export function DeviceTable({
     )
   }
 
+  function renderExtraColumnCell(d: Device, col: string): JSX.Element {
+    const isEditing = editingExtra?.id === d.id && editingExtra.col === col
+    const v = getExtraColumnValue?.(d.id, col) ?? ''
+    if (!isEditing) {
+      return (
+        <span
+          className="cell-editable"
+          title="Click to edit"
+          onClick={(e) => {
+            e.stopPropagation()
+            setEditing(null)
+            setDraft('')
+            setEditingExtra({ id: d.id, col })
+            setDraftExtra(v)
+          }}
+        >
+          {v}
+        </span>
+      )
+    }
+    return (
+      <input
+        className="table-input"
+        type="text"
+        autoComplete="off"
+        value={draftExtra}
+        disabled={saving}
+        onChange={(e) => setDraftExtra(e.target.value)}
+        onBlur={() => {
+          onSetExtraColumnValue?.(d.id, col, draftExtra)
+          cancelEdit()
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            onSetExtraColumnValue?.(d.id, col, draftExtra)
+            cancelEdit()
+          }
+          if (e.key === 'Escape') cancelEdit()
+        }}
+        autoFocus
+      />
+    )
+  }
+
   function subnetGroupLabel(d: Device): string {
     const parts = d.ip.split('.')
     if (parts.length === 4) return `${parts[0]}.${parts[1]}.${parts[2]}.x`
@@ -184,28 +292,142 @@ export function DeviceTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [devices, groupBy])
 
+  const isHidden = (k: string): boolean => hiddenColumns?.[k] === true
+  const visibleExtraColumns = extraColumns.filter((c) => !isHidden(c))
+  const colKeys = [
+    'name',
+    'group',
+    'status',
+    'ip',
+    'subnet',
+    'gateway',
+    ...visibleExtraColumns,
+    'type',
+    'mac',
+    'vendor',
+    'lastChecked',
+    'actions'
+  ].filter((k) => !isHidden(k))
+
+  const colCount = colKeys.length
+
+  const th = (key: string, content: React.ReactNode, opts?: { sortable?: boolean; onClick?: () => void }) => {
+    const w = getColumnWidthPx?.(key)
+    const style = w != null ? ({ width: `${w}px` } as React.CSSProperties) : undefined
+    return (
+      <th
+        key={key}
+        className="device-th"
+        style={style}
+        onClick={opts?.onClick}
+      >
+        <span className="device-th__content">{content}</span>
+        <span
+          className="device-th__resize-handle"
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            const el = (e.currentTarget.parentElement as HTMLElement | null) ?? null
+            const startW = el ? el.getBoundingClientRect().width : 120
+            resizeRef.current = { key, startX: e.clientX, startW }
+          }}
+        />
+      </th>
+    )
+  }
+
   return (
     <div className="table-wrap">
-      <table>
+      <table className="device-table">
+        <colgroup>
+          {colKeys.map((k) => {
+            const w = getColumnWidthPx?.(k)
+            return <col key={k} style={w != null ? ({ width: `${w}px` } as React.CSSProperties) : undefined} />
+          })}
+        </colgroup>
         <thead>
           <tr>
-            <th onClick={() => onSort('name')}>{label('name', 'Name')}</th>
-            <th onClick={() => onSort('group')}>{label('group', 'Group')}</th>
-            <th onClick={() => onSort('status')}>{label('status', 'Status')}</th>
-            <th>IP</th>
-            <th>Subnet</th>
-            <th>Gateway</th>
-            <th>Type</th>
-            <th>MAC</th>
-            <th>Vendor</th>
-            <th onClick={() => onSort('lastChecked')}>{label('lastChecked', 'Last checked')}</th>
-            <th className="th-actions" />
+            {!isHidden('name') ? th('name', label('name', 'Name'), { sortable: true, onClick: () => onSort('name') }) : null}
+            {!isHidden('group') ? th('group', label('group', 'Group'), { sortable: true, onClick: () => onSort('group') }) : null}
+            {!isHidden('status') ? th('status', label('status', 'Status'), { sortable: true, onClick: () => onSort('status') }) : null}
+            {!isHidden('ip') ? th('ip', 'IP') : null}
+            {!isHidden('subnet') ? th('subnet', 'Subnet') : null}
+            {!isHidden('gateway') ? th('gateway', 'Gateway') : null}
+            {visibleExtraColumns.map((c) =>
+              th(
+                c,
+                renamingCol === c ? (
+                  <input
+                    className="table-input"
+                    type="text"
+                    value={draftColName}
+                    onChange={(e) => setDraftColName(e.target.value)}
+                    onBlur={() => {
+                      const next = draftColName.trim()
+                      if (next && next !== c) {
+                        onRenameExtraColumn?.(c, next)
+                      }
+                      cancelEdit()
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const next = draftColName.trim()
+                        if (next && next !== c) {
+                          onRenameExtraColumn?.(c, next)
+                        }
+                        cancelEdit()
+                      }
+                      if (e.key === 'Escape') cancelEdit()
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setEditing(null)
+                        setDraft('')
+                        setEditingExtra(null)
+                        setDraftExtra('')
+                        setRenamingCol(c)
+                        setDraftColName(c)
+                      }}
+                    >
+                      {c}
+                    </span>
+                    <button
+                      type="button"
+                      className="danger-icon"
+                      title={`Delete column “${c}”`}
+                      aria-label={`Delete column ${c}`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (!confirm(`Delete column “${c}”?`)) return
+                        onDeleteExtraColumn?.(c)
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                )
+              )
+            )}
+            {!isHidden('type') ? th('type', 'Type') : null}
+            {!isHidden('mac') ? th('mac', 'MAC') : null}
+            {!isHidden('vendor') ? th('vendor', 'Vendor') : null}
+            {!isHidden('lastChecked')
+              ? th('lastChecked', label('lastChecked', 'Last checked'), {
+                  sortable: true,
+                  onClick: () => onSort('lastChecked')
+                })
+              : null}
+            {!isHidden('actions') ? th('actions', '', { sortable: false }) : null}
           </tr>
         </thead>
         <tbody>
           {devices.length === 0 ? (
             <tr>
-              <td colSpan={11} className="muted">
+              <td colSpan={colCount} className="muted">
                 No devices yet. Add one to begin monitoring.
               </td>
             </tr>
@@ -215,7 +437,7 @@ export function DeviceTable({
               if (groupBy !== 'none') {
                 rows.push(
                   <tr key={`group-${g.label}`} className="group-row">
-                    <td colSpan={11} className="group-cell">
+                    <td colSpan={colCount} className="group-cell">
                       {g.label}
                     </td>
                   </tr>
@@ -223,51 +445,82 @@ export function DeviceTable({
               }
               for (const d of g.devices) {
                 rows.push(
-                  <tr key={d.id}>
-                    <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'name')}</td>
-                    <td onMouseDown={(e) => e.stopPropagation()}>
-                      <select
-                        className="table-select"
-                        aria-label={`Group for ${d.name}`}
-                        value={d.groupId ?? ''}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          void onSetDeviceGroup(d.id, v === '' ? null : v)
-                        }}
+                  <tr
+                    key={d.id}
+                    data-device-row={d.id}
+                    className={selectedDeviceId === d.id ? 'device-row device-row--selected' : 'device-row'}
+                    onClick={() => onSelectDevice?.(d.id)}
+                  >
+                    {!isHidden('name') ? (
+                      <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'name')}</td>
+                    ) : null}
+                    {!isHidden('group') ? (
+                      <td onMouseDown={(e) => e.stopPropagation()}>
+                        <select
+                          className="table-select"
+                          aria-label={`Group for ${d.name}`}
+                          value={d.groupId ?? ''}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            void onSetDeviceGroup(d.id, v === '' ? null : v)
+                          }}
+                        >
+                          <option value="">— None —</option>
+                          {groups.map((gg) => (
+                            <option key={gg.id} value={gg.id}>
+                              {gg.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    ) : null}
+                    {!isHidden('status') ? (
+                      <td>
+                        <span
+                          className={`status-dot ${statusClass(d.lastStatus)}`}
+                          title={d.lastStatus}
+                        />
+                        {d.lastStatus}
+                      </td>
+                    ) : null}
+                    {!isHidden('ip') ? (
+                      <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'ip')}</td>
+                    ) : null}
+                    {!isHidden('subnet') ? (
+                      <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'subnet')}</td>
+                    ) : null}
+                    {!isHidden('gateway') ? (
+                      <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'gateway')}</td>
+                    ) : null}
+                    {visibleExtraColumns.map((c) => (
+                      <td
+                        key={`${d.id}\u0000${c}`}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
                       >
-                        <option value="">— None —</option>
-                        {groups.map((gg) => (
-                          <option key={gg.id} value={gg.id}>
-                            {gg.name}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td>
-                      <span
-                        className={`status-dot ${statusClass(d.lastStatus)}`}
-                        title={d.lastStatus}
-                      />
-                      {d.lastStatus}
-                    </td>
-                    <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'ip')}</td>
-                    <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'subnet')}</td>
-                    <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'gateway')}</td>
-                    <td className="muted">{getDeviceTypeDisplayLabel(d)}</td>
-                    <td className="muted">{d.macAddress ?? '—'}</td>
-                    <td className="muted">{d.vendor ?? '—'}</td>
-                    <td className="muted">{formatTime(d.lastChecked)}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="danger-icon"
-                        title="Delete"
-                        aria-label={`Delete ${d.name}`}
-                        onClick={() => onDelete(d.id)}
-                      >
-                        ×
-                      </button>
-                    </td>
+                        {renderExtraColumnCell(d, c)}
+                      </td>
+                    ))}
+                    {!isHidden('type') ? <td className="muted">{getDeviceTypeDisplayLabel(d)}</td> : null}
+                    {!isHidden('mac') ? <td className="muted">{d.macAddress ?? '—'}</td> : null}
+                    {!isHidden('vendor') ? <td className="muted">{d.vendor ?? '—'}</td> : null}
+                    {!isHidden('lastChecked') ? <td className="muted">{formatTime(d.lastChecked)}</td> : null}
+                    {!isHidden('actions') ? (
+                      <td>
+                        <button
+                          type="button"
+                          className="danger-icon"
+                          title="Delete"
+                          aria-label={`Delete ${d.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onDelete(d.id)
+                          }}
+                        >
+                          ×
+                        </button>
+                      </td>
+                    ) : null}
                   </tr>
                 )
               }

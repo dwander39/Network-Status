@@ -82,6 +82,22 @@ export function App(): JSX.Element {
   const [viewingProfile, setViewingProfile] = useState<NetworkProfileListItem | null>(null)
   const [newNetwork, setNewNetwork] = useState<import('@shared/types').NewNetworkDetectedPayload | null>(null)
   const [mainView, setMainView] = useState<MainViewMode>('list')
+  const [focusNameEditDeviceId, setFocusNameEditDeviceId] = useState<string | null>(null)
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
+  const [addMultipleOpen, setAddMultipleOpen] = useState(false)
+  const [addMultipleCount, setAddMultipleCount] = useState('3')
+  const [extraColumns, setExtraColumns] = useState<string[]>([])
+  const [extraColumnValues, setExtraColumnValues] = useState<Record<string, Record<string, string>>>({})
+  const [columnWidthsPx, setColumnWidthsPx] = useState<Record<string, number>>({})
+  const [hiddenColumns, setHiddenColumns] = useState<Record<string, boolean>>({})
+  const [columnsPanelOpen, setColumnsPanelOpen] = useState(false)
+  const [inspectorDraft, setInspectorDraft] = useState<Pick<SaveDevicePayload, 'name' | 'ip' | 'subnet' | 'gateway'>>({
+    name: '',
+    ip: '',
+    subnet: '',
+    gateway: ''
+  })
+  const [inspectorSaving, setInspectorSaving] = useState(false)
 
   const viewingHistoricalProfile = viewingProfile != null && viewingProfile.isActive === false
   const savedIps = useMemo(() => new Set(devices.map((d) => d.ip)), [devices])
@@ -89,6 +105,10 @@ export function App(): JSX.Element {
 
   const onProfilesUpdated = useCallback((list: NetworkProfileListItem[]) => {
     setProfiles(list)
+  }, [])
+
+  const onFocusNameEditHandled = useCallback(() => {
+    setFocusNameEditDeviceId(null)
   }, [])
 
   const load = useCallback(async () => {
@@ -177,6 +197,21 @@ export function App(): JSX.Element {
     if (filter === 'offline') list = list.filter((x) => x.lastStatus === 'offline')
     return sortDevices(list, sortKey, sortDir)
   }, [devices, viewingHistoricalProfile, filter, sortKey, sortDir])
+
+  const selectedDevice = useMemo(() => {
+    if (!selectedDeviceId) return null
+    return devices.find((d) => d.id === selectedDeviceId) ?? null
+  }, [devices, selectedDeviceId])
+
+  useEffect(() => {
+    if (!selectedDevice) return
+    setInspectorDraft({
+      name: selectedDevice.name,
+      ip: selectedDevice.ip,
+      subnet: selectedDevice.subnet,
+      gateway: selectedDevice.gateway
+    })
+  }, [selectedDevice?.id, selectedDevice?.name, selectedDevice?.ip, selectedDevice?.subnet, selectedDevice?.gateway])
 
   if (loadError) {
     return (
@@ -295,36 +330,26 @@ export function App(): JSX.Element {
           onClick={() => {
             void (async () => {
               try {
-                const taken = new Set(devices.map((d) => d.ip))
-                const anchor = (networkInfo?.gateway ?? networkInfo?.localIpv4 ?? '').trim()
-                let ip = ''
-                const m = anchor.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/)
-                if (m) {
-                  const pre = `${m[1]}.${m[2]}.${m[3]}`
-                  for (let last = 254; last >= 2; last--) {
-                    const c = `${pre}.${last}`
-                    if (!taken.has(c)) {
-                      ip = c
-                      break
-                    }
+                for (let attempt = 0; attempt < 16; attempt++) {
+                  const b = new Uint8Array(1)
+                  crypto.getRandomValues(b)
+                  const ip = `203.0.113.${2 + (b[0] % 253)}`
+                  try {
+                    const created = await api.saveDevice({
+                      name: 'New device',
+                      ip,
+                      subnet: '',
+                      gateway: ''
+                    })
+                    setFocusNameEditDeviceId(created.id)
+                    return
+                  } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e)
+                    if (msg.includes('already')) continue
+                    throw e
                   }
                 }
-                if (!ip) {
-                  for (let last = 2; last <= 254; last++) {
-                    const c = `10.0.0.${last}`
-                    if (!taken.has(c)) {
-                      ip = c
-                      break
-                    }
-                  }
-                }
-                if (!ip) ip = '10.0.0.2'
-                await api.saveDevice({
-                  name: 'New device',
-                  ip,
-                  subnet: '',
-                  gateway: (networkInfo?.gateway ?? '').trim()
-                })
+                throw new Error('Could not add device')
               } catch (e) {
                 alert(e instanceof Error ? e.message : 'Could not add device')
               }
@@ -333,6 +358,36 @@ export function App(): JSX.Element {
         >
           Add device
         </button>
+        {mainView === 'list' ? (
+          <button
+            type="button"
+            onClick={() => {
+              setAddMultipleOpen(true)
+            }}
+          >
+            Add Multiple…
+          </button>
+        ) : null}
+        {mainView === 'list' ? (
+          <button
+            type="button"
+            onClick={() => {
+              setExtraColumns((cols) => cols.concat(`Column ${cols.length + 1}`))
+            }}
+          >
+            Add Column
+          </button>
+        ) : null}
+        {mainView === 'list' ? (
+          <button
+            type="button"
+            onClick={() => {
+              setColumnsPanelOpen((v) => !v)
+            }}
+          >
+            Columns…
+          </button>
+        ) : null}
         <button type="button" onClick={() => void api.openMapViewWindow()}>
           Open Map View Window
         </button>
@@ -374,6 +429,119 @@ export function App(): JSX.Element {
         )}
       </div>
 
+      {mainView === 'list' && columnsPanelOpen ? (
+        <div className="banner banner-muted">
+          <div className="columns-panel">
+            <strong>Columns</strong>
+            <div className="columns-panel__grid">
+              {[
+                { key: 'name', label: 'Name' },
+                { key: 'group', label: 'Group' },
+                { key: 'status', label: 'Status' },
+                { key: 'ip', label: 'IP' },
+                { key: 'subnet', label: 'Subnet' },
+                { key: 'gateway', label: 'Gateway' },
+                ...extraColumns.map((c) => ({ key: c, label: c })),
+                { key: 'type', label: 'Type' },
+                { key: 'mac', label: 'MAC' },
+                { key: 'vendor', label: 'Vendor' },
+                { key: 'lastChecked', label: 'Last checked' },
+                { key: 'actions', label: 'Actions' }
+              ].map((c) => {
+                const checked = hiddenColumns[c.key] !== true
+                return (
+                  <label key={c.key} className="columns-panel__item">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        const nextVisible = e.target.checked
+                        setHiddenColumns((prev) => {
+                          if (nextVisible) {
+                            const { [c.key]: _x, ...rest } = prev
+                            return rest
+                          }
+                          return { ...prev, [c.key]: true }
+                        })
+                      }}
+                    />{' '}
+                    {c.label}
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {mainView === 'list' && addMultipleOpen ? (
+        <div className="banner banner-muted">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              void (async () => {
+                const n = Number.parseInt(addMultipleCount, 10)
+                if (!Number.isFinite(n) || n <= 0) {
+                  alert('Enter a positive whole number.')
+                  return
+                }
+                try {
+                  let lastCreatedId: string | null = null
+                  for (let i = 0; i < n; i++) {
+                    for (let attempt = 0; attempt < 16; attempt++) {
+                      const b = new Uint8Array(1)
+                      crypto.getRandomValues(b)
+                      const ip = `203.0.113.${2 + (b[0] % 253)}`
+                      try {
+                        const created = await api.saveDevice({
+                          name: 'New device',
+                          ip,
+                          subnet: '',
+                          gateway: ''
+                        })
+                        lastCreatedId = created.id
+                        break
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : String(err)
+                        if (msg.includes('already')) continue
+                        throw err
+                      }
+                    }
+                    if (!lastCreatedId) throw new Error('Could not add devices')
+                  }
+                  if (lastCreatedId) setFocusNameEditDeviceId(lastCreatedId)
+                  setAddMultipleOpen(false)
+                } catch (err) {
+                  alert(err instanceof Error ? err.message : 'Could not add devices')
+                }
+              })()
+            }}
+          >
+            <strong>Add Multiple…</strong>{' '}
+            <label>
+              Count{' '}
+              <input
+                className="table-input"
+                type="number"
+                min={1}
+                step={1}
+                value={addMultipleCount}
+                onChange={(e) => setAddMultipleCount(e.target.value)}
+              />
+            </label>{' '}
+            <button type="submit">Add</button>{' '}
+            <button
+              type="button"
+              onClick={() => {
+                setAddMultipleOpen(false)
+              }}
+            >
+              Cancel
+            </button>
+          </form>
+        </div>
+      ) : null}
+
       {settings.listenAdapterNames.length === 0 ? (
         <div className="banner banner-warn">
           Monitoring is paused because no network adapters are selected. Devices are shown as offline and
@@ -389,25 +557,198 @@ export function App(): JSX.Element {
       />
 
       {mainView === 'list' ? (
-        <DeviceTable
-          devices={filtered}
-          groups={groups}
-          groupBy={groupBy}
-          sortKey={sortKey}
-          sortDir={sortDir}
-          onSort={toggleSort}
-          onDelete={(id) => void handleDelete(id)}
-          onSetDeviceGroup={async (deviceId, groupId) => {
-            try {
-              await api.setDeviceGroup(deviceId, groupId)
-            } catch (e) {
-              alert(e instanceof Error ? e.message : 'Could not update group')
-            }
-          }}
-          onSaveDevice={async (payload) => {
-            await api.saveDevice(payload)
-          }}
-        />
+        <div className="list-view-split">
+          <div className="list-view-split__table">
+            <DeviceTable
+              devices={filtered}
+              groups={groups}
+              groupBy={groupBy}
+              sortKey={sortKey}
+              sortDir={sortDir}
+              onSort={toggleSort}
+              onDelete={(id) => void handleDelete(id)}
+              onSetDeviceGroup={async (deviceId, groupId) => {
+                try {
+                  await api.setDeviceGroup(deviceId, groupId)
+                } catch (e) {
+                  alert(e instanceof Error ? e.message : 'Could not update group')
+                }
+              }}
+              onSaveDevice={async (payload) => {
+                await api.saveDevice(payload)
+              }}
+              extraColumns={extraColumns}
+              hiddenColumns={hiddenColumns}
+              getExtraColumnValue={(deviceId, col) => extraColumnValues[deviceId]?.[col] ?? ''}
+              onSetExtraColumnValue={(deviceId, col, value) => {
+                setExtraColumnValues((prev) => ({
+                  ...prev,
+                  [deviceId]: { ...(prev[deviceId] ?? {}), [col]: value }
+                }))
+              }}
+              onRenameExtraColumn={(oldName, newName) => {
+                if (extraColumns.includes(newName)) {
+                  alert('A column with that name already exists.')
+                  return
+                }
+                setExtraColumns((cols) => cols.map((c) => (c === oldName ? newName : c)))
+                setExtraColumnValues((prev) => {
+                  const out: typeof prev = {}
+                  for (const deviceId of Object.keys(prev)) {
+                    const row = prev[deviceId] ?? {}
+                    if (!(oldName in row)) {
+                      out[deviceId] = row
+                      continue
+                    }
+                    const { [oldName]: v, ...rest } = row
+                    out[deviceId] = { ...rest, [newName]: v }
+                  }
+                  return out
+                })
+                setColumnWidthsPx((prev) => {
+                  if (!(oldName in prev)) return prev
+                  const { [oldName]: w, ...rest } = prev
+                  return { ...rest, [newName]: w }
+                })
+                setHiddenColumns((prev) => {
+                  if (!(oldName in prev)) return prev
+                  const { [oldName]: h, ...rest } = prev
+                  return { ...rest, [newName]: h }
+                })
+              }}
+              onDeleteExtraColumn={(name) => {
+                setExtraColumns((cols) => cols.filter((c) => c !== name))
+                setExtraColumnValues((prev) => {
+                  const out: typeof prev = {}
+                  for (const deviceId of Object.keys(prev)) {
+                    const row = prev[deviceId] ?? {}
+                    if (!(name in row)) {
+                      out[deviceId] = row
+                      continue
+                    }
+                    const { [name]: _v, ...rest } = row
+                    out[deviceId] = rest
+                  }
+                  return out
+                })
+                setColumnWidthsPx((prev) => {
+                  const { [name]: _w, ...rest } = prev
+                  return rest
+                })
+                setHiddenColumns((prev) => {
+                  const { [name]: _h, ...rest } = prev
+                  return rest
+                })
+              }}
+              getColumnWidthPx={(key) => columnWidthsPx[key]}
+              onSetColumnWidthPx={(key, w) => {
+                setColumnWidthsPx((prev) => ({ ...prev, [key]: w }))
+              }}
+              focusNameEditDeviceId={focusNameEditDeviceId}
+              onFocusNameEditHandled={onFocusNameEditHandled}
+              selectedDeviceId={selectedDeviceId}
+              onSelectDevice={(id) => setSelectedDeviceId(id)}
+            />
+          </div>
+          <aside className="list-inspector" aria-label="Device details">
+            {selectedDevice ? (
+              <>
+                <div className="list-inspector__header">
+                  <strong>Device</strong>
+                  <button type="button" onClick={() => setSelectedDeviceId(null)}>
+                    Close
+                  </button>
+                </div>
+                <div className="list-inspector__body">
+                  <div className="list-inspector__row">
+                    <span className="muted">Name</span>
+                    <input
+                      className="table-input"
+                      type="text"
+                      value={inspectorDraft.name}
+                      disabled={inspectorSaving}
+                      onChange={(e) => setInspectorDraft((d) => ({ ...d, name: e.target.value }))}
+                    />
+                  </div>
+                  <div className="list-inspector__row">
+                    <span className="muted">IP</span>
+                    <input
+                      className="table-input"
+                      type="text"
+                      value={inspectorDraft.ip}
+                      disabled={inspectorSaving}
+                      onChange={(e) => setInspectorDraft((d) => ({ ...d, ip: e.target.value }))}
+                    />
+                  </div>
+                  <div className="list-inspector__row">
+                    <span className="muted">Subnet</span>
+                    <input
+                      className="table-input"
+                      type="text"
+                      value={inspectorDraft.subnet}
+                      disabled={inspectorSaving}
+                      onChange={(e) => setInspectorDraft((d) => ({ ...d, subnet: e.target.value }))}
+                    />
+                  </div>
+                  <div className="list-inspector__row">
+                    <span className="muted">Gateway</span>
+                    <input
+                      className="table-input"
+                      type="text"
+                      value={inspectorDraft.gateway}
+                      disabled={inspectorSaving}
+                      onChange={(e) => setInspectorDraft((d) => ({ ...d, gateway: e.target.value }))}
+                    />
+                  </div>
+                  <div className="list-inspector__row">
+                    <span className="muted">Save</span>
+                    <button
+                      type="button"
+                      disabled={inspectorSaving}
+                      onClick={() => {
+                        void (async () => {
+                          setInspectorSaving(true)
+                          try {
+                            const next = await api.saveDevice({
+                              id: selectedDevice.id,
+                              name: inspectorDraft.name,
+                              ip: inspectorDraft.ip,
+                              subnet: inspectorDraft.subnet,
+                              gateway: inspectorDraft.gateway,
+                              groupId: selectedDevice.groupId
+                            })
+                            setInspectorDraft({
+                              name: next.name,
+                              ip: next.ip,
+                              subnet: next.subnet,
+                              gateway: next.gateway
+                            })
+                          } catch (e) {
+                            alert(e instanceof Error ? e.message : 'Save failed.')
+                          } finally {
+                            setInspectorSaving(false)
+                          }
+                        })()
+                      }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                  <div className="list-inspector__row">
+                    <span className="muted">Status</span>
+                    <span>{selectedDevice.lastStatus}</span>
+                  </div>
+                  <div className="list-inspector__row">
+                    <span className="muted">Last checked</span>
+                    <span>{selectedDevice.lastChecked ? new Date(selectedDevice.lastChecked).toLocaleString() : '—'}</span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="muted">Select a device to view details.</p>
+            )}
+          </aside>
+        </div>
       ) : (
         <Suspense fallback={<p className="muted">Loading map…</p>}>
           <MapView
