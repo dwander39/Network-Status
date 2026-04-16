@@ -267,7 +267,11 @@ export function App(): JSX.Element {
   }
 
   return (
-    <div className={`app${mainView === 'map' ? ' app--map-view' : ''}`}>
+    <div
+      className={`app${mainView === 'map' ? ' app--map-view' : ''}${
+        mainView === 'list' ? ' app--list-view' : ''
+      }`}
+    >
       <h1>Network devices</h1>
 
       <nav className="settings-submenu view-mode-nav" aria-label="Main view">
@@ -557,197 +561,211 @@ export function App(): JSX.Element {
       />
 
       {mainView === 'list' ? (
-        <div className="list-view-split">
-          <div className="list-view-split__table">
-            <DeviceTable
-              devices={filtered}
-              groups={groups}
-              groupBy={groupBy}
-              sortKey={sortKey}
-              sortDir={sortDir}
-              onSort={toggleSort}
-              onDelete={(id) => void handleDelete(id)}
-              onSetDeviceGroup={async (deviceId, groupId) => {
-                try {
-                  await api.setDeviceGroup(deviceId, groupId)
-                } catch (e) {
-                  alert(e instanceof Error ? e.message : 'Could not update group')
-                }
-              }}
-              onSaveDevice={async (payload) => {
-                await api.saveDevice(payload)
-              }}
-              extraColumns={extraColumns}
-              hiddenColumns={hiddenColumns}
-              getExtraColumnValue={(deviceId, col) => extraColumnValues[deviceId]?.[col] ?? ''}
-              onSetExtraColumnValue={(deviceId, col, value) => {
-                setExtraColumnValues((prev) => ({
-                  ...prev,
-                  [deviceId]: { ...(prev[deviceId] ?? {}), [col]: value }
-                }))
-              }}
-              onRenameExtraColumn={(oldName, newName) => {
-                if (extraColumns.includes(newName)) {
-                  alert('A column with that name already exists.')
-                  return
-                }
-                setExtraColumns((cols) => cols.map((c) => (c === oldName ? newName : c)))
-                setExtraColumnValues((prev) => {
-                  const out: typeof prev = {}
-                  for (const deviceId of Object.keys(prev)) {
-                    const row = prev[deviceId] ?? {}
-                    if (!(oldName in row)) {
-                      out[deviceId] = row
-                      continue
-                    }
-                    const { [oldName]: v, ...rest } = row
-                    out[deviceId] = { ...rest, [newName]: v }
-                  }
-                  return out
-                })
-                setColumnWidthsPx((prev) => {
-                  if (!(oldName in prev)) return prev
-                  const { [oldName]: w, ...rest } = prev
-                  return { ...rest, [newName]: w }
-                })
-                setHiddenColumns((prev) => {
-                  if (!(oldName in prev)) return prev
-                  const { [oldName]: h, ...rest } = prev
-                  return { ...rest, [newName]: h }
-                })
-              }}
-              onDeleteExtraColumn={(name) => {
-                setExtraColumns((cols) => cols.filter((c) => c !== name))
-                setExtraColumnValues((prev) => {
-                  const out: typeof prev = {}
-                  for (const deviceId of Object.keys(prev)) {
-                    const row = prev[deviceId] ?? {}
-                    if (!(name in row)) {
-                      out[deviceId] = row
-                      continue
-                    }
-                    const { [name]: _v, ...rest } = row
-                    out[deviceId] = rest
-                  }
-                  return out
-                })
-                setColumnWidthsPx((prev) => {
-                  const { [name]: _w, ...rest } = prev
-                  return rest
-                })
-                setHiddenColumns((prev) => {
-                  const { [name]: _h, ...rest } = prev
-                  return rest
-                })
-              }}
-              getColumnWidthPx={(key) => columnWidthsPx[key]}
-              onSetColumnWidthPx={(key, w) => {
-                setColumnWidthsPx((prev) => ({ ...prev, [key]: w }))
-              }}
-              focusNameEditDeviceId={focusNameEditDeviceId}
-              onFocusNameEditHandled={onFocusNameEditHandled}
-              selectedDeviceId={selectedDeviceId}
-              onSelectDevice={(id) => setSelectedDeviceId(id)}
-            />
-          </div>
-          <aside className="list-inspector" aria-label="Device details">
-            {selectedDevice ? (
-              <>
-                <div className="list-inspector__header">
-                  <strong>Device</strong>
-                  <button type="button" onClick={() => setSelectedDeviceId(null)}>
-                    Close
-                  </button>
-                </div>
-                <div className="list-inspector__body">
-                  <div className="list-inspector__row">
-                    <span className="muted">Name</span>
-                    <input
-                      className="table-input"
-                      type="text"
-                      value={inspectorDraft.name}
-                      disabled={inspectorSaving}
-                      onChange={(e) => setInspectorDraft((d) => ({ ...d, name: e.target.value }))}
-                    />
-                  </div>
-                  <div className="list-inspector__row">
-                    <span className="muted">IP</span>
-                    <input
-                      className="table-input"
-                      type="text"
-                      value={inspectorDraft.ip}
-                      disabled={inspectorSaving}
-                      onChange={(e) => setInspectorDraft((d) => ({ ...d, ip: e.target.value }))}
-                    />
-                  </div>
-                  <div className="list-inspector__row">
-                    <span className="muted">Subnet</span>
-                    <input
-                      className="table-input"
-                      type="text"
-                      value={inspectorDraft.subnet}
-                      disabled={inspectorSaving}
-                      onChange={(e) => setInspectorDraft((d) => ({ ...d, subnet: e.target.value }))}
-                    />
-                  </div>
-                  <div className="list-inspector__row">
-                    <span className="muted">Gateway</span>
-                    <input
-                      className="table-input"
-                      type="text"
-                      value={inspectorDraft.gateway}
-                      disabled={inspectorSaving}
-                      onChange={(e) => setInspectorDraft((d) => ({ ...d, gateway: e.target.value }))}
-                    />
-                  </div>
-                  <div className="list-inspector__row">
-                    <span className="muted">Save</span>
-                    <button
-                      type="button"
-                      disabled={inspectorSaving}
-                      onClick={() => {
-                        void (async () => {
-                          setInspectorSaving(true)
-                          try {
-                            const next = await api.saveDevice({
-                              id: selectedDevice.id,
-                              name: inspectorDraft.name,
-                              ip: inspectorDraft.ip,
-                              subnet: inspectorDraft.subnet,
-                              gateway: inspectorDraft.gateway,
-                              groupId: selectedDevice.groupId
-                            })
-                            setInspectorDraft({
-                              name: next.name,
-                              ip: next.ip,
-                              subnet: next.subnet,
-                              gateway: next.gateway
-                            })
-                          } catch (e) {
-                            alert(e instanceof Error ? e.message : 'Save failed.')
-                          } finally {
-                            setInspectorSaving(false)
-                          }
-                        })()
+        <div className="list-page">
+          <div className="list-page__top" />
+          <div className="list-page__content">
+            <div className="list-page__zones">
+              <div className="list-page__left" />
+              <div className="list-page__center">
+                <div className="list-view-split">
+                  <div className="list-view-split__table">
+                    <DeviceTable
+                      devices={filtered}
+                      groups={groups}
+                      groupBy={groupBy}
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                      onDelete={(id) => void handleDelete(id)}
+                      onSetDeviceGroup={async (deviceId, groupId) => {
+                        try {
+                          await api.setDeviceGroup(deviceId, groupId)
+                        } catch (e) {
+                          alert(e instanceof Error ? e.message : 'Could not update group')
+                        }
                       }}
-                    >
-                      Save
-                    </button>
-                  </div>
-                  <div className="list-inspector__row">
-                    <span className="muted">Status</span>
-                    <span>{selectedDevice.lastStatus}</span>
-                  </div>
-                  <div className="list-inspector__row">
-                    <span className="muted">Last checked</span>
-                    <span>{selectedDevice.lastChecked ? new Date(selectedDevice.lastChecked).toLocaleString() : '—'}</span>
+                      onSaveDevice={async (payload) => {
+                        await api.saveDevice(payload)
+                      }}
+                      extraColumns={extraColumns}
+                      hiddenColumns={hiddenColumns}
+                      getExtraColumnValue={(deviceId, col) => extraColumnValues[deviceId]?.[col] ?? ''}
+                      onSetExtraColumnValue={(deviceId, col, value) => {
+                        setExtraColumnValues((prev) => ({
+                          ...prev,
+                          [deviceId]: { ...(prev[deviceId] ?? {}), [col]: value }
+                        }))
+                      }}
+                      onRenameExtraColumn={(oldName, newName) => {
+                        if (extraColumns.includes(newName)) {
+                          alert('A column with that name already exists.')
+                          return
+                        }
+                        setExtraColumns((cols) => cols.map((c) => (c === oldName ? newName : c)))
+                        setExtraColumnValues((prev) => {
+                          const out: typeof prev = {}
+                          for (const deviceId of Object.keys(prev)) {
+                            const row = prev[deviceId] ?? {}
+                            if (!(oldName in row)) {
+                              out[deviceId] = row
+                              continue
+                            }
+                            const { [oldName]: v, ...rest } = row
+                            out[deviceId] = { ...rest, [newName]: v }
+                          }
+                          return out
+                        })
+                        setColumnWidthsPx((prev) => {
+                          if (!(oldName in prev)) return prev
+                          const { [oldName]: w, ...rest } = prev
+                          return { ...rest, [newName]: w }
+                        })
+                        setHiddenColumns((prev) => {
+                          if (!(oldName in prev)) return prev
+                          const { [oldName]: h, ...rest } = prev
+                          return { ...rest, [newName]: h }
+                        })
+                      }}
+                      onDeleteExtraColumn={(name) => {
+                        setExtraColumns((cols) => cols.filter((c) => c !== name))
+                        setExtraColumnValues((prev) => {
+                          const out: typeof prev = {}
+                          for (const deviceId of Object.keys(prev)) {
+                            const row = prev[deviceId] ?? {}
+                            if (!(name in row)) {
+                              out[deviceId] = row
+                              continue
+                            }
+                            const { [name]: _v, ...rest } = row
+                            out[deviceId] = rest
+                          }
+                          return out
+                        })
+                        setColumnWidthsPx((prev) => {
+                          const { [name]: _w, ...rest } = prev
+                          return rest
+                        })
+                        setHiddenColumns((prev) => {
+                          const { [name]: _h, ...rest } = prev
+                          return rest
+                        })
+                      }}
+                      getColumnWidthPx={(key) => columnWidthsPx[key]}
+                      onSetColumnWidthPx={(key, w) => {
+                        setColumnWidthsPx((prev) => ({ ...prev, [key]: w }))
+                      }}
+                      focusNameEditDeviceId={focusNameEditDeviceId}
+                      onFocusNameEditHandled={onFocusNameEditHandled}
+                      selectedDeviceId={selectedDeviceId}
+                      onSelectDevice={(id) => setSelectedDeviceId(id)}
+                    />
                   </div>
                 </div>
-              </>
-            ) : (
-              <p className="muted">Select a device to view details.</p>
-            )}
-          </aside>
+              </div>
+              <div className="list-page__right">
+                <aside className="list-inspector" aria-label="Device details">
+                  {selectedDevice ? (
+                    <>
+                      <div className="list-inspector__header">
+                        <strong>Device</strong>
+                        <button type="button" onClick={() => setSelectedDeviceId(null)}>
+                          Close
+                        </button>
+                      </div>
+                      <div className="list-inspector__body">
+                        <div className="list-inspector__row">
+                          <span className="muted">Name</span>
+                          <input
+                            className="table-input"
+                            type="text"
+                            value={inspectorDraft.name}
+                            disabled={inspectorSaving}
+                            onChange={(e) => setInspectorDraft((d) => ({ ...d, name: e.target.value }))}
+                          />
+                        </div>
+                        <div className="list-inspector__row">
+                          <span className="muted">IP</span>
+                          <input
+                            className="table-input"
+                            type="text"
+                            value={inspectorDraft.ip}
+                            disabled={inspectorSaving}
+                            onChange={(e) => setInspectorDraft((d) => ({ ...d, ip: e.target.value }))}
+                          />
+                        </div>
+                        <div className="list-inspector__row">
+                          <span className="muted">Subnet</span>
+                          <input
+                            className="table-input"
+                            type="text"
+                            value={inspectorDraft.subnet}
+                            disabled={inspectorSaving}
+                            onChange={(e) => setInspectorDraft((d) => ({ ...d, subnet: e.target.value }))}
+                          />
+                        </div>
+                        <div className="list-inspector__row">
+                          <span className="muted">Gateway</span>
+                          <input
+                            className="table-input"
+                            type="text"
+                            value={inspectorDraft.gateway}
+                            disabled={inspectorSaving}
+                            onChange={(e) => setInspectorDraft((d) => ({ ...d, gateway: e.target.value }))}
+                          />
+                        </div>
+                        <div className="list-inspector__row">
+                          <span className="muted">Save</span>
+                          <button
+                            type="button"
+                            disabled={inspectorSaving}
+                            onClick={() => {
+                              void (async () => {
+                                setInspectorSaving(true)
+                                try {
+                                  const next = await api.saveDevice({
+                                    id: selectedDevice.id,
+                                    name: inspectorDraft.name,
+                                    ip: inspectorDraft.ip,
+                                    subnet: inspectorDraft.subnet,
+                                    gateway: inspectorDraft.gateway,
+                                    groupId: selectedDevice.groupId
+                                  })
+                                  setInspectorDraft({
+                                    name: next.name,
+                                    ip: next.ip,
+                                    subnet: next.subnet,
+                                    gateway: next.gateway
+                                  })
+                                } catch (e) {
+                                  alert(e instanceof Error ? e.message : 'Save failed.')
+                                } finally {
+                                  setInspectorSaving(false)
+                                }
+                              })()
+                            }}
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <div className="list-inspector__row">
+                          <span className="muted">Status</span>
+                          <span>{selectedDevice.lastStatus}</span>
+                        </div>
+                        <div className="list-inspector__row">
+                          <span className="muted">Last checked</span>
+                          <span>
+                            {selectedDevice.lastChecked ? new Date(selectedDevice.lastChecked).toLocaleString() : '—'}
+                          </span>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="muted">Select a device to view details.</p>
+                  )}
+                </aside>
+              </div>
+            </div>
+          </div>
         </div>
       ) : (
         <Suspense fallback={<p className="muted">Loading map…</p>}>
