@@ -419,7 +419,14 @@ function registerIpc(): void {
     return false
   })
 
-  ipcMain.handle(IPC.FOCUS_BROWSER_WINDOW_FOR_KEYBOARD, (_e, context?: string) => {
+  ipcMain.handle(IPC.FOCUS_BROWSER_WINDOW_FOR_KEYBOARD, (event, context?: string) => {
+    const senderWin = BrowserWindow.fromWebContents(event.sender)
+    if (senderWin && !senderWin.isDestroyed()) {
+      if (!senderWin.isVisible()) senderWin.show()
+      senderWin.focus()
+      senderWin.webContents.focus()
+      return
+    }
     focusBrowserWindowForKeyboardFromMain(typeof context === 'string' ? context : 'unknown')
   })
 

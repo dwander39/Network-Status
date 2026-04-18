@@ -1,6 +1,11 @@
 import { memo } from 'react'
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import { emojiForDeviceTypeDisplay, getDeviceTypeDisplayLabel } from '@shared/deviceTypeDisplay'
+import {
+  mapPocVisualDeviceTypeEmoji,
+  mapPocVisualDeviceTypeLabel,
+  parseMapPocVisualDeviceType
+} from '@shared/mapPocVisualDeviceTypes'
 import type { Device, DeviceType } from '@shared/types'
 
 export type DeviceNodeData = {
@@ -52,8 +57,10 @@ function DeviceNodeInner({ data, selected }: NodeProps<DeviceFlowNode>): JSX.Ele
       : d.lastStatus === 'offline'
         ? 'status-offline'
         : 'status-unknown'
-  const displayType = getDeviceTypeDisplayLabel(d)
-  const emoji = emojiForDeviceTypeDisplay(d, emojiForDeviceType)
+  const pocType = parseMapPocVisualDeviceType(d)
+  const displayType = pocType != null ? mapPocVisualDeviceTypeLabel(pocType) : getDeviceTypeDisplayLabel(d)
+  const emoji =
+    pocType != null ? mapPocVisualDeviceTypeEmoji(pocType) : emojiForDeviceTypeDisplay(d, emojiForDeviceType)
 
   const stopControl = (e: React.SyntheticEvent) => {
     e.stopPropagation()

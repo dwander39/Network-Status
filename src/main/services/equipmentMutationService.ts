@@ -451,7 +451,8 @@ export function mutateDeviceFromSavePayload(
     groupId: nextGroupId,
     networkId: projectId,
     touchDeviceTypeCustom: true,
-    deviceTypeCustom: insertCustom
+    deviceTypeCustom: insertCustom,
+    deviceType: payload.deviceType
   })
 
   const next = getDeviceById(db, id)!

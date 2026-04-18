@@ -26,17 +26,22 @@ import type {
   DeviceGroup,
   MapLayoutBundle,
   MapLayoutSavePayload,
+  MapLayoutSnapshot,
   MapManualGroup,
   NetworkInfo,
   SaveDevicePayload
 } from '@shared/types'
+import {
+  mapPocVisualDeviceTypeDefaultDeviceType,
+  mapPocVisualDeviceTypeEmoji,
+  mapPocVisualDeviceTypeLabel,
+  type MapPocVisualDeviceType
+} from '@shared/mapPocVisualDeviceTypes'
 import type { DeviceNodeData } from './map/DeviceNode'
 import { useConfirmAction } from '../confirm/ConfirmDialogContext'
 import { useSelectionState } from '../selection/SelectionStateContext'
-import {
-  logDeleteFlowPreDelete,
-  recoverKeyboardAfterDestructiveAction
-} from '../utils/postDeleteFocusRecovery'
+import { logDeleteFlowPreDelete, recoverKeyboardAfterDestructiveAction } from '../utils/postDeleteFocusRecovery'
+import { prepareAppWindowForKeyboardInput } from '../utils/ensureTextFieldFocus'
 import { AutoGroupNode } from './map/AutoGroupNode'
 import { DeviceNode } from './map/DeviceNode'
 import { GatewayNode } from './map/GatewayNode'
@@ -148,6 +153,18 @@ const MAP_EDGE_STYLE: CSSProperties = {
 
 const DEFAULT_NEW_GROUP_W = 380
 const DEFAULT_NEW_GROUP_H = 220
+
+/** Approximate manual `device` node size for viewport-centered POC placement (matches RF fallbacks). */
+const POC_PLACEMENT_DEVICE_W = 180
+const POC_PLACEMENT_DEVICE_H = 116
+/**
+ * POC-only burst offset (Step 7): repeated “Add Device” creates nudge in flow space so icons do not
+ * stack; not a general placement engine. Resets after a short idle gap.
+ */
+const POC_CREATE_CASCADE_DX = 28
+const POC_CREATE_CASCADE_DY = 20
+const POC_CREATE_CASCADE_STEPS = 6
+const POC_CREATE_CASCADE_RESET_AFTER_MS = 5000
 
 const nodeTypes = {
   device: DeviceNode,
@@ -530,6 +547,22 @@ function MapCanvas({
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const didInitialFit = useRef(false)
   const flowWrapRef = useRef<HTMLDivElement>(null)
+  /** Step 5/9: Add Device popover — declared early so effects can reference it without TDZ issues. */
+  const [pocAddDeviceOpen, setPocAddDeviceOpen] = useState(false)
+  const [pocAddTileHover, setPocAddTileHover] = useState<MapPocVisualDeviceType | null>(null)
+  const pocAddDeviceSurfaceRef = useRef<HTMLDivElement | null>(null)
+  const pendingFocusCreatedDeviceIdRef = useRef<string | null>(null)
+  const pocCreateCascadeRef = useRef<{ lastAt: number; step: number }>({ lastAt: 0, step: -1 })
+  /** POC naming (Step 8): in-session tie-break when numbering races ON_DEVICES_CHANGED. */
+  const pocNameSeqRef = useRef<Partial<Record<MapPocVisualDeviceType, number>>>({})
+  /**
+   * POC create+place: first device paint can happen before `getMapLayout` returns the new row.
+   * Stash intended flow coords here so manual `buildMapNodes` can merge them for one frame without
+   * a visible jump to `defaultDevicePosition`. Cleared when bundle catches up or device disappears.
+   */
+  const pocPendingInitialPlacementRef = useRef<
+    Record<string, { x: number; y: number; manualGroupId: string | null }>
+  >({})
   const [inspectorInnerWidthPx, setInspectorInnerWidthPx] = useState(readStoredMapInspectorWidth)
   const inspectorInnerWidthRef = useRef(inspectorInnerWidthPx)
   inspectorInnerWidthRef.current = inspectorInnerWidthPx
@@ -1263,11 +1296,33 @@ function MapCanvas({
       return
     }
     const reseedFromSaved = prevMode !== 'manual' || prevBundleReloadTickRef.current !== bundleReloadTick
+    /* Merge pending POC positions (see `pocPendingInitialPlacementRef`) before SQLite bundle has the row. */
+    const pending = pocPendingInitialPlacementRef.current
+    const deviceIdSet = new Set(devices.map((d) => d.id))
+    for (const id of Object.keys(pending)) {
+      if (!deviceIdSet.has(id)) {
+        delete pending[id]
+        continue
+      }
+      if (savedBundle.positions[id] != null) {
+        delete pending[id]
+      }
+    }
+    const mergedPositions: MapLayoutSnapshot = { ...savedBundle.positions }
+    for (const [id, p] of Object.entries(pending)) {
+      if (mergedPositions[id] == null && deviceIdSet.has(id)) {
+        mergedPositions[id] = { x: p.x, y: p.y, manualGroupId: p.manualGroupId }
+      }
+    }
+    const effectiveBundle: MapLayoutBundle = {
+      manualGroups: savedBundle.manualGroups,
+      positions: mergedPositions
+    }
     setNodesState((prev) =>
       buildMapNodes(
         reseedFromSaved ? [] : prev,
         devices,
-        savedBundle,
+        effectiveBundle,
         gw,
         groupHandlers.current,
         deviceLayoutHandlersRef.current
@@ -1384,6 +1439,8 @@ function MapCanvas({
       if (el instanceof HTMLElement && el.closest('input, textarea, select, [contenteditable="true"]')) {
         return
       }
+      setPocAddDeviceOpen(false)
+      setPocAddTileHover(null)
       setInspectorPeekDeviceId(null)
       const next = clearSelection()
       setMapSelection(next)
@@ -1392,7 +1449,21 @@ function MapCanvas({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection])
+  }, [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection, setMapSelection])
+
+  useEffect(() => {
+    if (!pocAddDeviceOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      const root = pocAddDeviceSurfaceRef.current
+      const t = e.target
+      if (!root || !(t instanceof Node)) return
+      if (root.contains(t)) return
+      setPocAddTileHover(null)
+      setPocAddDeviceOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [pocAddDeviceOpen])
 
   /**
    * Capture layout at drag start; `onNodeDragStop` compares to final layout and pushes one history entry.
@@ -1798,6 +1869,212 @@ function MapCanvas({
   const canMapUndo = manualChrome && undoStackRef.current.length > 0
   const canMapRedo = manualChrome && redoStackRef.current.length > 0
 
+  const focusCreatedDevice = useCallback(
+    (deviceId: string) => {
+      pendingFocusCreatedDeviceIdRef.current = deviceId
+      setInspectorPeekDeviceId(null)
+      const next = selectDevice(deviceId)
+      setMapSelection(next)
+      commitSharedEquipmentFromMapSelection(next)
+      blurNonInputFocusInMap()
+    },
+    [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection, setMapSelection]
+  )
+
+  useEffect(() => {
+    const id = pendingFocusCreatedDeviceIdRef.current
+    if (!id) return
+    const node = nodes.find((n) => n.id === id && n.type === 'device')
+    if (!node) return
+    pendingFocusCreatedDeviceIdRef.current = null
+
+    const wrap = flowWrapRef.current?.getBoundingClientRect()
+    if (!wrap) return
+    const byId = new Map(nodes.map((n) => [n.id, n]))
+    const abs = absoluteNodePosition(node, byId)
+    const screen = flowToScreenPosition(abs)
+
+    const margin = 28
+    const visible =
+      screen.x >= wrap.left + margin &&
+      screen.x <= wrap.right - margin &&
+      screen.y >= wrap.top + margin &&
+      screen.y <= wrap.bottom - margin
+
+    if (!visible) {
+      void setCenter(abs.x + POC_PLACEMENT_DEVICE_W / 2, abs.y + POC_PLACEMENT_DEVICE_H / 2, {
+        zoom: getZoom(),
+        duration: 220
+      })
+    }
+  }, [flowToScreenPosition, getZoom, nodes, setCenter])
+
+  const createPocMapDevice = useCallback(
+    async (slug: MapPocVisualDeviceType) => {
+      /**
+       * POC vertical slice: toolbar “Add Device” → real `saveDevice` + `saveMapLayout`, select/fit,
+       * one `pushMapHistory` entry for create+place. Undo/redo for that entry is recorded only when
+       * `pushMapHistory` runs (manual layout + saved network); no drag palette / click-to-place.
+       */
+      const deviceType = mapPocVisualDeviceTypeDefaultDeviceType(slug)
+      const label = mapPocVisualDeviceTypeLabel(slug)
+      const nextName = (() => {
+        /* Names like "Lighting Fixture 3" from existing persisted POC rows (`deviceTypeCustom` slug). */
+        // Seed from already-loaded persisted device list; tie-break with a local ref to avoid
+        // collisions when the user creates multiple devices faster than ON_DEVICES_CHANGED pushes.
+        const re = new RegExp(`^${label.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s+(\\\\d+)$`, 'i')
+        let maxSeen = 0
+        for (const d of devices) {
+          if (d.deviceTypeCustom?.trim() !== slug) continue
+          const m = re.exec(d.name.trim())
+          if (!m) continue
+          const n = Number(m[1])
+          if (Number.isFinite(n)) maxSeen = Math.max(maxSeen, n)
+        }
+        const prev = pocNameSeqRef.current[slug] ?? 0
+        const next = Math.max(maxSeen, prev) + 1
+        pocNameSeqRef.current[slug] = next
+        return `${label} ${next}`
+      })()
+      const nid = networkId?.trim() ?? ''
+      const flowViewportCenterTopLeft = (): { x: number; y: number } => {
+        const el = flowWrapRef.current
+        const rect = el?.getBoundingClientRect()
+        const center =
+          rect != null
+            ? screenToFlowPosition({
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2
+              })
+            : { x: 400, y: 280 }
+        return {
+          x: center.x - POC_PLACEMENT_DEVICE_W / 2,
+          y: center.y - POC_PLACEMENT_DEVICE_H / 2
+        }
+      }
+      const nextCascadeOffset = (): { dx: number; dy: number } => {
+        const now = Date.now()
+        const s = pocCreateCascadeRef.current
+        if (now - s.lastAt > POC_CREATE_CASCADE_RESET_AFTER_MS) {
+          s.step = -1
+        }
+        s.lastAt = now
+        s.step = (s.step + 1) % POC_CREATE_CASCADE_STEPS
+        return { dx: s.step * POC_CREATE_CASCADE_DX, dy: s.step * POC_CREATE_CASCADE_DY }
+      }
+      try {
+        for (let attempt = 0; attempt < 16; attempt++) {
+          const b = new Uint8Array(1)
+          crypto.getRandomValues(b)
+          const ip = `203.0.113.${2 + (b[0] % 253)}`
+          const savePayload: SaveDevicePayload = {
+            name: nextName,
+            ip,
+            subnet: '',
+            gateway: '',
+            deviceType,
+            deviceTypeCustom: slug
+          }
+          try {
+            const created = await api.saveDevice(savePayload)
+            const base = flowViewportCenterTopLeft()
+            const off = nextCascadeOffset()
+            const pos = { x: base.x + off.dx, y: base.y + off.dy }
+            if (nid && layoutModeRef.current === 'manual') {
+              pocPendingInitialPlacementRef.current[created.id] = {
+                x: pos.x,
+                y: pos.y,
+                manualGroupId: null
+              }
+            }
+            if (nid) {
+              try {
+                await api.saveMapLayout({
+                  networkId: nid,
+                  positions: [{ nodeKey: created.id, x: pos.x, y: pos.y, manualGroupId: null }]
+                })
+              } catch {
+                delete pocPendingInitialPlacementRef.current[created.id]
+                throw new Error('Could not save map layout for new device')
+              }
+            }
+            focusCreatedDevice(created.id)
+            const cmdState = { deviceId: created.id }
+            pushMapHistory({
+              type: 'pocCreateMapDevice',
+              undo: async () => {
+                logDeleteFlowPreDelete('map:pocUndoCreateDevice')
+                delete pocPendingInitialPlacementRef.current[cmdState.deviceId]
+                await api.deleteDevice(cmdState.deviceId)
+                setInspectorPeekDeviceId(null)
+                const cleared = clearSelection()
+                setMapSelection(cleared)
+                commitSharedEquipmentFromMapSelection(cleared)
+                setNodesState((ns) => ns.map((n) => ({ ...n, selected: false })))
+                setEdges((es) => es.map((e) => ({ ...e, selected: false })))
+                blurNonInputFocusInMap()
+                /* Keyboard IPC resets in-page focus; await then refocus map so nav (“List view”) does not steal it. */
+                await prepareAppWindowForKeyboardInput('map:pocUndoCreateDevice')
+                requestAnimationFrame(() => {
+                  try {
+                    flowWrapRef.current?.focus({ preventScroll: true })
+                  } catch {
+                    /* ignore */
+                  }
+                })
+              },
+              redo: async () => {
+                const d = await api.saveDevice(savePayload)
+                cmdState.deviceId = d.id
+                if (nid && layoutModeRef.current === 'manual') {
+                  pocPendingInitialPlacementRef.current[d.id] = {
+                    x: pos.x,
+                    y: pos.y,
+                    manualGroupId: null
+                  }
+                }
+                if (nid) {
+                  try {
+                    await api.saveMapLayout({
+                      networkId: nid,
+                      positions: [{ nodeKey: d.id, x: pos.x, y: pos.y, manualGroupId: null }]
+                    })
+                  } catch {
+                    delete pocPendingInitialPlacementRef.current[d.id]
+                    throw new Error('Could not save map layout for new device')
+                  }
+                }
+                focusCreatedDevice(d.id)
+              }
+            })
+            return
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            if (msg.includes('already')) continue
+            throw e
+          }
+        }
+        throw new Error('Could not add device (IP collision retries exhausted)')
+      } catch (e) {
+        alert(e instanceof Error ? e.message : 'Could not add device')
+      }
+    },
+    [
+      api,
+      devices,
+      networkId,
+      pushMapHistory,
+      screenToFlowPosition,
+      setEdges,
+      setInspectorPeekDeviceId,
+      setMapSelection,
+      setNodesState,
+      focusCreatedDevice,
+      commitSharedEquipmentFromMapSelection,
+      blurNonInputFocusInMap
+    ]
+  )
+
   return (
     <div className="map-flow-wrap">
       <div className="map-view-workspace">
@@ -1820,6 +2097,104 @@ function MapCanvas({
             <option value="subnet">Group by subnet</option>
           </select>
         </label>
+        <div ref={pocAddDeviceSurfaceRef} style={{ position: 'relative', display: 'inline-flex' }}>
+          <button
+            type="button"
+            className="secondary"
+            aria-haspopup="menu"
+            aria-expanded={pocAddDeviceOpen}
+            onClick={() =>
+              setPocAddDeviceOpen((v) => {
+                const next = !v
+                if (!next) setPocAddTileHover(null)
+                return next
+              })
+            }
+          >
+            Add Device
+          </button>
+          {pocAddDeviceOpen ? (
+            <div
+              role="menu"
+              aria-label="Add equipment"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% + 6px)',
+                left: 0,
+                zIndex: 20,
+                background: 'var(--panel-bg, #111827)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 10,
+                padding: 8,
+                minWidth: 248,
+                boxShadow: '0 10px 30px rgba(0,0,0,0.35)'
+              }}
+            >
+              {(['lighting_fixture', 'network_switch', 'dmx_node'] as const).map((t, i, arr) => {
+                const hovered = pocAddTileHover === t
+                const dt = mapPocVisualDeviceTypeDefaultDeviceType(t)
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    role="menuitem"
+                    aria-label={`Add ${mapPocVisualDeviceTypeLabel(t)}`}
+                    onMouseEnter={() => setPocAddTileHover(t)}
+                    onMouseLeave={() => setPocAddTileHover((cur) => (cur === t ? null : cur))}
+                    style={{
+                      width: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      margin: 0,
+                      marginBottom: i < arr.length - 1 ? 8 : 0,
+                      padding: '10px 12px',
+                      borderRadius: 8,
+                      border: '1px solid rgba(255,255,255,0.14)',
+                      background: hovered ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)',
+                      color: 'inherit',
+                      font: 'inherit',
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                    onClick={() => {
+                      setPocAddDeviceOpen(false)
+                      setPocAddTileHover(null)
+                      void createPocMapDevice(t)
+                    }}
+                  >
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 40,
+                        height: 40,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        borderRadius: 8,
+                        border: '1px solid rgba(255,255,255,0.12)',
+                        background: 'rgba(0,0,0,0.18)',
+                        fontSize: 20,
+                        lineHeight: 1,
+                        flex: '0 0 auto'
+                      }}
+                    >
+                      {mapPocVisualDeviceTypeEmoji(t)}
+                    </span>
+                    <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                      <span style={{ fontWeight: 600, lineHeight: 1.2 }}>{mapPocVisualDeviceTypeLabel(t)}</span>
+                      <span className="muted" style={{ fontSize: 12, lineHeight: 1.2 }}>
+                        Device type: {dt}
+                      </span>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
+        </div>
         <button type="button" className="secondary" onClick={handleCenterView}>
           Center view
         </button>
@@ -1908,6 +2283,7 @@ function MapCanvas({
           <div
             className={`map-flow map-view-body-grid__map${!manualChrome ? ' map-flow--auto-view' : ''}`}
             ref={flowWrapRef}
+            tabIndex={-1}
             onPointerDownCapture={onMapFlowPointerDownCapture}
             onPointerMove={onMapFlowPointerMove}
             onPointerUp={onMapFlowPointerUp}

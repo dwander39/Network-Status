@@ -10,7 +10,8 @@
  * and/or call existing map IPC, then rely on debounced `saveMapLayout` for positions.
  *
  * Limited to Manual layout: `canRecordHistoryRef` gates push/pop/shortcuts; auto-group modes never
- * mutate stacks (see MapView).
+ * mutate stacks (see MapView). POC `pocCreateMapDevice` is pushed under the same gate (manual + saved
+ * network only); other modes skip history while placement may still persist for when user returns to Manual.
  */
 
 export interface MapLayoutCommand {

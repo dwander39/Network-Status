@@ -24,6 +24,11 @@ export interface SaveDevicePayload {
   /** Omit on save to leave unchanged; explicit `null` clears the group. */
   groupId?: string | null
   /**
+   * Optional inferred type on **create** (`id` omitted). Persisted to `device_type`; when omitted,
+   * insert uses the DB default (`Unknown`).
+   */
+  deviceType?: DeviceType
+  /**
    * Optional display-only type override. Omit on update to leave DB unchanged;
    * `null` clears so the inferred `device_type` is shown again.
    */

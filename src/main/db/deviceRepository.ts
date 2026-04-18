@@ -120,6 +120,8 @@ export function persistNormalizedDevice(
     touchDeviceTypeCustom: boolean
     /** Normalized custom type; used on insert always; on update only when touchDeviceTypeCustom. */
     deviceTypeCustom: string | null
+    /** Insert only: `device_type` column (defaults to `Unknown` when omitted). */
+    deviceType?: DeviceType
   }
 ): void {
   const {
@@ -132,7 +134,8 @@ export function persistNormalizedDevice(
     groupId,
     networkId,
     touchDeviceTypeCustom,
-    deviceTypeCustom
+    deviceTypeCustom,
+    deviceType: insertDeviceType
   } = input
 
   if (mode === 'update') {
@@ -148,10 +151,11 @@ export function persistNormalizedDevice(
     return
   }
 
+  const deviceType = insertDeviceType ?? 'Unknown'
   db.prepare(
-    `INSERT INTO devices (id, name, ip, subnet, gateway, group_id, network_id, last_status, last_checked, device_type_custom)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)`
-  ).run(id, name, ip, subnet, gateway, groupId, networkId, new Date().toISOString(), deviceTypeCustom)
+    `INSERT INTO devices (id, name, ip, subnet, gateway, group_id, network_id, last_status, last_checked, device_type_custom, device_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?)`
+  ).run(id, name, ip, subnet, gateway, groupId, networkId, new Date().toISOString(), deviceTypeCustom, deviceType)
 }
 
 /** @internal Used when the mutation service allocates a new id before persist. */
