@@ -32,6 +32,7 @@ import type {
 } from '@shared/types'
 import type { DeviceNodeData } from './map/DeviceNode'
 import { useConfirmAction } from '../confirm/ConfirmDialogContext'
+import { useSelectionState } from '../selection/SelectionStateContext'
 import {
   logDeleteFlowPreDelete,
   recoverKeyboardAfterDestructiveAction
@@ -48,6 +49,7 @@ import {
   clearSelection,
   deviceChildOfLockedManualGroup,
   initialMapSelection,
+  mapSelectionToSharedEquipmentIds,
   mapSelectionDeviceCount,
   mapSelectionGatewayCount,
   mapSelectionManualGroupCount,
@@ -651,6 +653,17 @@ function MapCanvas({
 
   /** Phase 2C.1 — canonical selection; synced to React Flow `node.selected` for styling only. */
   const [mapSelection, setMapSelection] = useState<MapSelection>(initialMapSelection)
+  /** Cross-surface (v1 Step 3): list-driven equipment ids — reflection only on `node.selected`. */
+  const { selectedEquipmentIds, setSelectedEquipmentIds } = useSelectionState()
+  /** Clears shared ids only for `none`; sets when selection includes devices; otherwise leaves shared unchanged. */
+  const commitSharedEquipmentFromMapSelection = useCallback((sel: MapSelection) => {
+    if (sel.kind === 'none') {
+      setSelectedEquipmentIds(new Set())
+      return
+    }
+    const ids = mapSelectionToSharedEquipmentIds(sel)
+    if (ids.size > 0) setSelectedEquipmentIds(ids)
+  }, [setSelectedEquipmentIds])
   /** Inspector-only: device to show while canvas keeps a locked manual group selected (see `onNodeClick`). */
   const [inspectorPeekDeviceId, setInspectorPeekDeviceId] = useState<string | null>(null)
 
@@ -1331,14 +1344,16 @@ function MapCanvas({
     setNodesState((nds) => {
       let changed = false
       const next = nds.map((n) => {
-        const sel = nodeMatchesMapSelection(n, mapSelection, layoutMode, nds)
+        const mapSel = nodeMatchesMapSelection(n, mapSelection, layoutMode, nds)
+        const sharedListHighlight = n.type === 'device' && selectedEquipmentIds.has(n.id)
+        const sel = mapSel || sharedListHighlight
         if (n.selected === sel) return n
         changed = true
         return { ...n, selected: sel }
       })
       return changed ? next : nds
     })
-  }, [layoutMode, mapSelection, mapGraphRebuildTick, setNodesState])
+  }, [layoutMode, mapSelection, mapGraphRebuildTick, selectedEquipmentIds, setNodesState])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1374,12 +1389,14 @@ function MapCanvas({
         return
       }
       setInspectorPeekDeviceId(null)
-      setMapSelection(clearSelection())
+      const next = clearSelection()
+      setMapSelection(next)
+      commitSharedEquipmentFromMapSelection(next)
       blurNonInputFocusInMap()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [blurNonInputFocusInMap])
+  }, [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection])
 
   /**
    * Capture layout at drag start; `onNodeDragStop` compares to final layout and pushes one history entry.
@@ -1486,12 +1503,15 @@ function MapCanvas({
       const nds = getNodes()
       if (node.type === 'device') {
         if (deviceChildOfLockedManualGroup(node, nds) && node.parentId) {
-          setMapSelection(selectManualGroup(node.parentId))
+          const next = selectManualGroup(node.parentId)
+          setMapSelection(next)
           setInspectorPeekDeviceId(node.id)
           return
         }
         setInspectorPeekDeviceId(null)
-        setMapSelection(selectDevice(node.id))
+        const next = selectDevice(node.id)
+        setMapSelection(next)
+        commitSharedEquipmentFromMapSelection(next)
       } else if (node.type === 'manualGroup') {
         setInspectorPeekDeviceId(null)
         setMapSelection(selectManualGroup(node.id))
@@ -1504,7 +1524,7 @@ function MapCanvas({
         setMapSelection(selectGateway())
       }
     },
-    [getNodes]
+    [commitSharedEquipmentFromMapSelection, getNodes]
   )
 
   const onNodeContextMenu = useCallback(
@@ -1534,9 +1554,11 @@ function MapCanvas({
       return
     }
     setInspectorPeekDeviceId(null)
-    setMapSelection(clearSelection())
+    const next = clearSelection()
+    setMapSelection(next)
+    commitSharedEquipmentFromMapSelection(next)
     blurNonInputFocusInMap()
-  }, [blurNonInputFocusInMap])
+  }, [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection])
 
   useEffect(() => {
     marqueeActiveRef.current = marqueeFlow != null
@@ -1637,7 +1659,9 @@ function MapCanvas({
         // Treat as an empty-pane click (reliable clear) and ignore the ensuing RF onPaneClick.
         suppressNextPaneClickClearRef.current = true
         setInspectorPeekDeviceId(null)
-        setMapSelection(clearSelection())
+        const cleared = clearSelection()
+        setMapSelection(cleared)
+        commitSharedEquipmentFromMapSelection(cleared)
         blurNonInputFocusInMap()
         return
       }
@@ -1656,11 +1680,17 @@ function MapCanvas({
       const gwHit = gatewayInFlowRect(nds, rect, mode)
       const additive = e.shiftKey
       setInspectorPeekDeviceId(null)
-      setMapSelection((cur) =>
-        applyMarqueeMapSelection(cur, { devices: deviceIds, groups: groupIds, gateway: gwHit }, additive)
-      )
+      setMapSelection((cur) => {
+        const next = applyMarqueeMapSelection(
+          cur,
+          { devices: deviceIds, groups: groupIds, gateway: gwHit },
+          additive
+        )
+        commitSharedEquipmentFromMapSelection(next)
+        return next
+      })
     },
-    [blurNonInputFocusInMap, getNodes, setMapSelection]
+    [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection, getNodes, setMapSelection]
   )
 
   const handleCenterView = useCallback(() => {

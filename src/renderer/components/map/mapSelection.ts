@@ -47,6 +47,16 @@ export function clearSelection(): MapSelection {
   return { kind: 'none' }
 }
 
+/**
+ * Device/equipment ids derived from a map selection (empty when none or no devices).
+ * Map View must not treat an empty result as a signal to clear shared selection unless `sel.kind === 'none'`.
+ */
+export function mapSelectionToSharedEquipmentIds(sel: MapSelection): Set<string> {
+  if (sel.kind === 'device') return new Set([sel.deviceId])
+  if (sel.kind === 'multi') return new Set(sel.deviceIds)
+  return new Set()
+}
+
 export function selectDevice(deviceId: string): MapSelection {
   return { kind: 'device', deviceId }
 }

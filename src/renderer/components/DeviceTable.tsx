@@ -10,6 +10,7 @@ import {
 import { getDeviceTypeDisplayLabel } from '@shared/deviceTypeDisplay'
 import type { Device, DeviceGroup, DeviceStatus, SaveDevicePayload } from '@shared/types'
 import { isValidIPv4 } from '@shared/ipValidation'
+import { useSelectionState } from '../selection/SelectionStateContext'
 
 export type SortKey = 'name' | 'group' | 'status' | 'lastChecked'
 
@@ -88,8 +89,10 @@ export function DeviceTable({
   focusNameEditDeviceId,
   onFocusNameEditHandled
 }: Props): JSX.Element {
-  /** Multi-select + range (Shift); anchor in ref for synchronous reads with selection updates. */
-  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set())
+  /** Row highlight + cross-surface sync: final selected equipment ids from shared state (Step 2). */
+  const { selectedEquipmentIds, setSelectedEquipmentIds, clearSelectedEquipmentIds, getSelectedEquipmentIds } =
+    useSelectionState()
+  /** Multi-select + range (Shift); anchor in ref — local only. */
   const anchorRef = useRef<string | null>(null)
   /** Drag gesture: potential drag on pointerdown; commits selection in pointermove after threshold (Steps 1–4). */
   const dragGestureActiveRef = useRef(false)
@@ -147,7 +150,6 @@ export function DeviceTable({
     if (!d) return
     const row = document.querySelector(`[data-device-row="${d.id}"]`)
     row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-    setSelectedRowIds(new Set([d.id]))
     setEditing({ id: d.id, field: 'name' })
     setDraft(String(d.name ?? ''))
     onFocusNameEditHandled?.()
@@ -377,29 +379,28 @@ export function DeviceTable({
     if (shiftOnly) {
       const anchor = anchorRef.current
       if (anchor == null) {
-        setSelectedRowIds(new Set([id]))
+        setSelectedEquipmentIds(new Set([id]))
         return
       }
       const range = inclusiveDeviceIdRange(orderedVisibleDeviceIds, anchor, id)
       if (range == null) {
-        setSelectedRowIds(new Set([id]))
+        setSelectedEquipmentIds(new Set([id]))
         return
       }
-      setSelectedRowIds(range)
+      setSelectedEquipmentIds(range)
       return
     }
 
     if (mod) {
-      setSelectedRowIds((prev) => {
-        const next = new Set(prev)
-        if (next.has(id)) next.delete(id)
-        else next.add(id)
-        return next
-      })
+      const prev = getSelectedEquipmentIds()
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      setSelectedEquipmentIds(next)
       return
     }
 
-    setSelectedRowIds(new Set([id]))
+    setSelectedEquipmentIds(new Set([id]))
     anchorRef.current = id
   }
 
@@ -408,34 +409,21 @@ export function DeviceTable({
     if (anchorRef.current != null && !allowed.has(anchorRef.current)) {
       anchorRef.current = null
     }
-    setSelectedRowIds((prev) => {
-      const next = new Set([...prev].filter((id) => allowed.has(id)))
-      if (next.size === prev.size && [...prev].every((id) => next.has(id))) return prev
-      return next
-    })
   }, [devices])
 
   useEffect(() => {
-    if (anchorRef.current != null && !selectedRowIds.has(anchorRef.current)) {
+    if (anchorRef.current != null && !selectedEquipmentIds.has(anchorRef.current)) {
       anchorRef.current = null
     }
-  }, [selectedRowIds])
+  }, [selectedEquipmentIds])
 
-  /** Step 3 (v1.1): selection and anchor stay consistent with rows currently shown in the table body. */
+  /** Local anchor only: if pivot row is not in the current table body order, clear anchor (does not mutate shared selection). */
   useEffect(() => {
     const visible = new Set(orderedVisibleDeviceIds)
     if (anchorRef.current != null && !visible.has(anchorRef.current)) {
       anchorRef.current = null
     }
-    setSelectedRowIds((prev) => {
-      const next = new Set<string>()
-      for (const id of prev) {
-        if (visible.has(id)) next.add(id)
-      }
-      if (next.size === prev.size && [...prev].every((id) => next.has(id))) return prev
-      return next
-    })
-  }, [orderedVisibleDeviceIds, selectedRowIds])
+  }, [orderedVisibleDeviceIds])
 
   useEffect(() => {
     return () => {
@@ -487,7 +475,7 @@ export function DeviceTable({
     }
     const mode = dragSelectionModeRef.current
     dragBaseSelectionRef.current =
-      mode === 'add' || mode === 'subtract' ? new Set(selectedRowIds) : null
+      mode === 'add' || mode === 'subtract' ? new Set(getSelectedEquipmentIds()) : null
     dragStartRowIndexRef.current = idx
     anchorRef.current = orderedVisibleDeviceIds[idx] ?? d.id
     dragStartPointerRef.current = { x: e.clientX, y: e.clientY }
@@ -538,18 +526,18 @@ export function DeviceTable({
       if (mode === 'add') {
         const next = new Set(dragBaseSelectionRef.current ?? [])
         for (const rid of rangeIds) next.add(rid)
-        setSelectedRowIds(next)
+        setSelectedEquipmentIds(next)
       } else if (mode === 'subtract') {
-        // Step 4 (v1.1): subtract only from the pointerdown snapshot — never live selectedRowIds.
+        // Step 4 (v1.1): subtract only from the pointerdown snapshot — not from ad-hoc live reads beyond base ref.
         // Delete only range ids that were in that base; unselected rows in the range are untouched.
         const base = dragBaseSelectionRef.current ?? new Set<string>()
         const next = new Set(base)
         for (const rid of rangeIds) {
           if (base.has(rid)) next.delete(rid)
         }
-        setSelectedRowIds(next)
+        setSelectedEquipmentIds(next)
       } else {
-        setSelectedRowIds(rangeIds)
+        setSelectedEquipmentIds(rangeIds)
       }
       // Step 5 (v1.1): real drag-applied selection this frame → end() may arm post-drag click skip only then.
       dragSelectionAppliedRef.current = true
@@ -644,12 +632,12 @@ export function DeviceTable({
     if (tgt.closest('thead')) return
     if (tgt.closest('button, input, select, textarea')) return
     if (tgt.closest('table.device-table')) {
-      setSelectedRowIds(new Set())
+      clearSelectedEquipmentIds()
       anchorRef.current = null
       return
     }
     if (e.target === e.currentTarget) {
-      setSelectedRowIds(new Set())
+      clearSelectedEquipmentIds()
       anchorRef.current = null
     }
   }
@@ -766,7 +754,9 @@ export function DeviceTable({
                   <tr
                     key={d.id}
                     data-device-row={d.id}
-                    className={selectedRowIds.has(d.id) ? 'device-row device-row--selected' : 'device-row'}
+                    className={
+                      selectedEquipmentIds.has(d.id) ? 'device-row device-row--selected' : 'device-row'
+                    }
                     onPointerDown={(e) => handleDeviceRowPointerDown(d, e)}
                     onClick={(e) => {
                       // After drag, skip blocks applyRowMouseSelection on the release click.
