@@ -1,4 +1,12 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type PointerEvent
+} from 'react'
 import { getDeviceTypeDisplayLabel } from '@shared/deviceTypeDisplay'
 import type { Device, DeviceGroup, DeviceStatus, SaveDevicePayload } from '@shared/types'
 import { isValidIPv4 } from '@shared/ipValidation'
@@ -48,6 +56,17 @@ function formatTime(iso: string | null): string {
   }
 }
 
+/** Squared distance must exceed this (px²) before drag-selection applies (Step 4). */
+const DRAG_SELECT_THRESHOLD_SQ = 4 * 4
+
+/** While a real drag is active, block native selection outside editable controls. */
+function preventNativeSelectWhileDeviceTableDrag(ev: Event): void {
+  const el = ev.target
+  if (!(el instanceof HTMLElement)) return
+  if (el.closest('input, textarea, [contenteditable="true"]')) return
+  ev.preventDefault()
+}
+
 export function DeviceTable({
   devices,
   groups,
@@ -72,6 +91,28 @@ export function DeviceTable({
   /** Multi-select + range (Shift); anchor in ref for synchronous reads with selection updates. */
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set())
   const anchorRef = useRef<string | null>(null)
+  /** Drag gesture: potential drag on pointerdown; commits selection in pointermove after threshold (Steps 1–4). */
+  const dragGestureActiveRef = useRef(false)
+  const dragStartRowIndexRef = useRef<number | null>(null)
+  const dragStartPointerRef = useRef<{ x: number; y: number } | null>(null)
+  /** Inclusive index range from drag start to current hover; null if pointer not over a device row. */
+  const dragCurrentRangeRef = useRef<{ rangeStart: number; rangeEnd: number } | null>(null)
+  const orderedVisibleDeviceIdsRef = useRef<readonly string[]>([])
+  const dragPointerMoveFnRef = useRef<((ev: PointerEvent) => void) | null>(null)
+  const dragPointerEndFnRef = useRef<(() => void) | null>(null)
+  const dragSelectionAppliedRef = useRef(false)
+  const skipNextRowClickRef = useRef(false)
+  const dragPassedThresholdRef = useRef(false)
+  /**
+   * Locked for one gesture at pointerdown: replace | add (Ctrl/Cmd) | subtract (Alt/Option).
+   * Precedence when multiple modifiers: subtract > add > replace. Shift still blocks drag start.
+   */
+  const dragSelectionModeRef = useRef<'replace' | 'add' | 'subtract' | null>(null)
+  /**
+   * Snapshot of selection at drag start for 'add' and 'subtract' modes (replace: null).
+   * Copy so later pointermove updates do not mutate it; subtract application deferred.
+   */
+  const dragBaseSelectionRef = useRef<Set<string> | null>(null)
   const [editing, setEditing] = useState<{ id: string; field: EditableField } | null>(null)
   const [draft, setDraft] = useState('')
   const [editingExtra, setEditingExtra] = useState<{ id: string; col: string } | null>(null)
@@ -309,6 +350,8 @@ export function DeviceTable({
     return ids
   }, [grouped])
 
+  orderedVisibleDeviceIdsRef.current = orderedVisibleDeviceIds
+
   function inclusiveDeviceIdRange(order: readonly string[], a: string, b: string): Set<string> | null {
     const ia = order.indexOf(a)
     const ib = order.indexOf(b)
@@ -323,9 +366,10 @@ export function DeviceTable({
   }
 
   /**
-   * Plain click: only that row; anchor = row.
+   * Plain click (no modifiers): that row only; if already selected, deselect it (anchor rules below).
    * Ctrl/Cmd: toggle row; anchor = row.
    * Shift (no Ctrl/Cmd): range anchor→row if anchor set; else same as plain; anchor unchanged on range (pivot).
+   * After drag, row onClick may bail out (skipNextRowClickRef) so this is not called on the release click.
    */
   function applyRowMouseSelection(id: string, e: MouseEvent<Element>): void {
     const mod = selectionModifier(e)
@@ -359,6 +403,32 @@ export function DeviceTable({
       return
     }
 
+    // Plain path: no Shift-range, no Ctrl/Cmd (handled above), no Alt — deselect if already selected.
+    if (!e.altKey && selectedRowIds.has(id)) {
+      const next = new Set(selectedRowIds)
+      next.delete(id)
+      const wasAnchor = anchorRef.current === id
+      setSelectedRowIds(next)
+
+      if (next.size === 0) {
+        anchorRef.current = null
+      } else if (wasAnchor) {
+        let fallback: string | null = null
+        for (let i = orderedVisibleDeviceIds.length - 1; i >= 0; i--) {
+          const oid = orderedVisibleDeviceIds[i]
+          if (oid !== undefined && next.has(oid)) {
+            fallback = oid
+            break
+          }
+        }
+        if (fallback == null && next.size > 0) {
+          fallback = [...next].sort((a, b) => a.localeCompare(b)).at(-1) ?? null
+        }
+        anchorRef.current = fallback
+      }
+      return
+    }
+
     setSelectedRowIds(new Set([id]))
     anchorRef.current = id
   }
@@ -374,6 +444,169 @@ export function DeviceTable({
       return next
     })
   }, [devices])
+
+  useEffect(() => {
+    return () => {
+      dragSelectionModeRef.current = null
+      dragBaseSelectionRef.current = null
+      window.removeEventListener('selectstart', preventNativeSelectWhileDeviceTableDrag, true)
+      const move = dragPointerMoveFnRef.current
+      if (move) {
+        window.removeEventListener('pointermove', move)
+        dragPointerMoveFnRef.current = null
+      }
+      const end = dragPointerEndFnRef.current
+      if (end) {
+        window.removeEventListener('pointerup', end)
+        window.removeEventListener('pointercancel', end)
+        dragPointerEndFnRef.current = null
+      }
+    }
+  }, [])
+
+  function handleDeviceRowPointerDown(d: Device, e: PointerEvent<HTMLTableRowElement>): void {
+    if (e.button !== 0) return
+    if (e.shiftKey) return
+    const tgt = e.target as HTMLElement
+    if (tgt.closest('button, input, select, textarea, a, [contenteditable="true"]')) return
+    if (editing?.id === d.id || editingExtra?.id === d.id) return
+    const idx = orderedVisibleDeviceIds.indexOf(d.id)
+    if (idx < 0) return
+
+    const prevEnd = dragPointerEndFnRef.current
+    if (prevEnd) {
+      window.removeEventListener('pointerup', prevEnd)
+      window.removeEventListener('pointercancel', prevEnd)
+      dragPointerEndFnRef.current = null
+    }
+    const prevMove = dragPointerMoveFnRef.current
+    if (prevMove) {
+      window.removeEventListener('pointermove', prevMove)
+      dragPointerMoveFnRef.current = null
+    }
+
+    dragGestureActiveRef.current = true
+    if (e.altKey) {
+      dragSelectionModeRef.current = 'subtract'
+    } else if (e.metaKey || e.ctrlKey) {
+      dragSelectionModeRef.current = 'add'
+    } else {
+      dragSelectionModeRef.current = 'replace'
+    }
+    const mode = dragSelectionModeRef.current
+    dragBaseSelectionRef.current =
+      mode === 'add' || mode === 'subtract' ? new Set(selectedRowIds) : null
+    dragStartRowIndexRef.current = idx
+    dragStartPointerRef.current = { x: e.clientX, y: e.clientY }
+    dragCurrentRangeRef.current = null
+    dragPassedThresholdRef.current = false
+    dragSelectionAppliedRef.current = false
+
+    const move = (ev: PointerEvent): void => {
+      if (!dragGestureActiveRef.current) return
+      const startIdx = dragStartRowIndexRef.current
+      const startPtr = dragStartPointerRef.current
+      if (startIdx == null || startPtr == null) return
+
+      const dx = ev.clientX - startPtr.x
+      const dy = ev.clientY - startPtr.y
+      if (!dragPassedThresholdRef.current) {
+        if (dx * dx + dy * dy < DRAG_SELECT_THRESHOLD_SQ) return
+        dragPassedThresholdRef.current = true
+        window.addEventListener('selectstart', preventNativeSelectWhileDeviceTableDrag, true)
+      }
+
+      const el = document.elementFromPoint(ev.clientX, ev.clientY)
+      const rowEl = el?.closest?.('[data-device-row]') as HTMLElement | null
+      if (!rowEl) {
+        return
+      }
+      const id = rowEl.getAttribute('data-device-row')
+      if (!id) {
+        return
+      }
+      const order = orderedVisibleDeviceIdsRef.current
+      const curIdx = order.indexOf(id)
+      if (curIdx < 0) {
+        return
+      }
+      const range = {
+        rangeStart: Math.min(startIdx, curIdx),
+        rangeEnd: Math.max(startIdx, curIdx)
+      }
+      dragCurrentRangeRef.current = range
+      const startId = order[startIdx]
+      const curId = order[curIdx]
+      if (!startId || !curId) return
+      const rangeIds = inclusiveDeviceIdRange(order, startId, curId)
+      if (!rangeIds) return
+      const mode = dragSelectionModeRef.current
+      if (mode === 'add') {
+        const next = new Set(dragBaseSelectionRef.current ?? [])
+        for (const rid of rangeIds) next.add(rid)
+        setSelectedRowIds(next)
+      } else if (mode === 'subtract') {
+        const next = new Set(dragBaseSelectionRef.current ?? [])
+        for (const rid of rangeIds) next.delete(rid)
+        setSelectedRowIds(next)
+      } else {
+        setSelectedRowIds(rangeIds)
+      }
+      // Step 5: drag-start row = Shift pivot after gesture (replace, add, subtract). Subtract may
+      // remove that row from selectedRowIds; anchor id still identifies the gesture pivot for Shift+click.
+      anchorRef.current = startId
+      dragSelectionAppliedRef.current = true
+    }
+    dragPointerMoveFnRef.current = move
+    window.addEventListener('pointermove', move)
+
+    const end = (): void => {
+      window.removeEventListener('selectstart', preventNativeSelectWhileDeviceTableDrag, true)
+      const mv = dragPointerMoveFnRef.current
+      if (mv) {
+        window.removeEventListener('pointermove', mv)
+        dragPointerMoveFnRef.current = null
+      }
+      // Real drag (threshold crossed + at least one range apply): selection is already the last
+      // pointermove result for replace, add, and subtract modes; keep it and suppress the follow-up
+      // click so it does not plain-select, Shift-range, or Ctrl/Cmd-toggle away that result (Alt on
+      // release would otherwise hit the plain-click path in applyRowMouseSelection).
+      const applied = dragSelectionAppliedRef.current
+      dragSelectionAppliedRef.current = false
+      if (applied) {
+        // Step 5: reaffirm drag-start as anchor after pointerup (replace, add, subtract). Pivot
+        // stays drag-start even if subtract cleared or emptied selection; post-drag skip prevents
+        // applyRowMouseSelection on release from overwriting anchor/selection.
+        const si = dragStartRowIndexRef.current
+        if (si != null) {
+          const sid = orderedVisibleDeviceIdsRef.current[si]
+          if (sid) anchorRef.current = sid
+        }
+        skipNextRowClickRef.current = true
+        // Bubble on window runs after React's delegated row click, so the row can see skip first.
+        window.addEventListener(
+          'click',
+          () => {
+            skipNextRowClickRef.current = false
+          },
+          { once: true }
+        )
+      }
+      dragGestureActiveRef.current = false
+      dragSelectionModeRef.current = null
+      dragBaseSelectionRef.current = null
+      dragStartRowIndexRef.current = null
+      dragStartPointerRef.current = null
+      dragCurrentRangeRef.current = null
+      dragPassedThresholdRef.current = false
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      dragPointerEndFnRef.current = null
+    }
+    dragPointerEndFnRef.current = end
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
+  }
 
   const isHidden = (k: string): boolean => hiddenColumns?.[k] === true
   const visibleExtraColumns = extraColumns.filter((c) => !isHidden(c))
@@ -546,7 +779,15 @@ export function DeviceTable({
                     key={d.id}
                     data-device-row={d.id}
                     className={selectedRowIds.has(d.id) ? 'device-row device-row--selected' : 'device-row'}
-                    onClick={(e) => applyRowMouseSelection(d.id, e)}
+                    onPointerDown={(e) => handleDeviceRowPointerDown(d, e)}
+                    onClick={(e) => {
+                      // Step 3: skip blocks all of applyRowMouseSelection (incl. plain deselect) after drag.
+                      if (skipNextRowClickRef.current) {
+                        skipNextRowClickRef.current = false
+                        return
+                      }
+                      applyRowMouseSelection(d.id, e)
+                    }}
                   >
                     {!isHidden('name') ? (
                       <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'name')}</td>
