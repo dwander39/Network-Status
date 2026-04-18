@@ -50,6 +50,10 @@ export const IPC = {
   ON_MAP_MANUAL_GROUP_LAYOUT_ACTION: 'mapLayout:manualGroupLayoutAction',
   /** Main → all map surfaces: persisted layout for `networkId` changed; re-fetch via GET_MAP_LAYOUT. */
   ON_MAP_LAYOUT_INVALIDATED: 'mapLayout:invalidated',
+  /** Persist one manual typed trace for the current LAN (POC). */
+  UPSERT_MAP_MANUAL_TRACE: 'mapManualTrace:upsert',
+  /** List manual traces for one `networkId` (POC). */
+  GET_MAP_MANUAL_TRACES: 'mapManualTrace:list',
   GET_EVENT_LOGS: 'eventLogs:get',
   ON_EVENT_LOG_ADDED: 'eventLogs:added',
   CLEAR_EVENT_LOGS: 'eventLogs:clear',

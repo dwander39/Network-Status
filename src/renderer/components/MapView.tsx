@@ -5,7 +5,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent
 } from 'react'
 import {
   Background,
@@ -28,15 +29,26 @@ import type {
   MapLayoutSavePayload,
   MapLayoutSnapshot,
   MapManualGroup,
+  MapManualTrace,
+  MapManualTraceConnectionType,
   NetworkInfo,
   SaveDevicePayload
 } from '@shared/types'
+import { mapManualTraceKeyFromRow, mapManualTraceLogicalKey } from '@shared/mapManualTraceLogicalKey'
 import {
   mapPocVisualDeviceTypeDefaultDeviceType,
   mapPocVisualDeviceTypeEmoji,
   mapPocVisualDeviceTypeLabel,
   type MapPocVisualDeviceType
 } from '@shared/mapPocVisualDeviceTypes'
+import { inferSnapIdsForManualTrace } from '@shared/mapDeviceSnapPoints'
+import {
+  draftTracePathOverlayRootClassName,
+  persistedManualTracePolylineClassName,
+  traceFamilyToCssSuffix
+} from '@shared/mapTraceFamilyVisual'
+import { pickTraceSnapHoverTarget, type TraceSnapHoverTarget } from '@shared/mapTraceSnapHoverPick'
+import { getTraceSnapAnchorFlowPosition } from '@shared/mapTraceSnapAnchorFlow'
 import type { DeviceNodeData } from './map/DeviceNode'
 import { useConfirmAction } from '../confirm/ConfirmDialogContext'
 import { useSelectionState } from '../selection/SelectionStateContext'
@@ -102,6 +114,14 @@ const MANUAL_GROUP_MIN_W = 220
 const MANUAL_GROUP_MIN_H = 140
 
 export type GroupBounds = { x: number; y: number; width: number; height: number }
+
+/** Manual trace POC: save / validation / IPC feedback (Step 14 — local banner only). */
+type TracePocCommitFeedback =
+  | null
+  | { variant: 'success'; message: string }
+  | { variant: 'invalid'; message: string }
+  | { variant: 'error'; message: string }
+  | { variant: 'info'; message: string }
 
 function sameGroupBounds(a: GroupBounds, b: GroupBounds): boolean {
   return (
@@ -310,7 +330,8 @@ function buildMapNodes(
   bundle: MapLayoutBundle,
   gatewayIp: string | null,
   handlers: GroupHandlers,
-  deviceHandlers: DeviceLayoutHandlers
+  deviceHandlers: DeviceLayoutHandlers,
+  traceSnapHover: TraceSnapHoverTarget | null = null
 ): Node[] {
   const prevById = new Map(prev.map((n) => [n.id, n]))
   const prevPos = new Map(prev.map((n) => [n.id, n.position]))
@@ -389,7 +410,8 @@ function buildMapNodes(
       device: d,
       mapManualLayout: true,
       mapDeviceCollapsed,
-      onToggleMapDeviceCollapsed: () => deviceHandlers.toggleCollapsed(d.id)
+      onToggleMapDeviceCollapsed: () => deviceHandlers.toggleCollapsed(d.id),
+      traceSnapHover
     }
 
     if (targetParent) {
@@ -437,14 +459,44 @@ function buildMapNodes(
   return [gatewayNode, ...groupNodes, ...deviceNodes]
 }
 
-function buildEdges(devices: Device[]): Edge[] {
-  return devices.map((d) => ({
-    id: `e-gw-${d.id}`,
-    source: MAP_GATEWAY_NODE_ID,
-    target: d.id,
-    style: { ...MAP_EDGE_STYLE },
-    animated: false
-  }))
+/**
+ * Automatic gateway→device edges are treated as `DMX`-class links for precedence (same class as legacy `Data` v1).
+ *
+ * POC precedence (Step 6 correction):
+ * 1. Exact triple — hide `gw→d` when a manual row matches `(MAP_GATEWAY_NODE_ID, d.id, DMX)` (future gateway-sourced manuals).
+ * 2. DMX / Network destination — hide `gw→d` when any persisted **DMX** or **Network** manual trace has
+ *    `destinationDeviceId === d`, so device→device non-Power traces can replace the “uplink” automatic edge to that device only.
+ *    Power manuals do not participate in this narrow rule (no Power auto edges today).
+ */
+const AUTO_GATEWAY_EDGE_CONNECTION_TYPE: MapManualTraceConnectionType = 'DMX'
+
+const MANUAL_TRACE_DEST_SUPPRESSES_AUTO_GW: ReadonlySet<MapManualTraceConnectionType> = new Set(['DMX', 'Network'])
+
+function buildEdges(devices: Device[], manualTraces: MapManualTrace[]): Edge[] {
+  const manualKeysExact = new Set(manualTraces.map((t) => mapManualTraceKeyFromRow(t)))
+  const nonPowerManualDestinationDeviceIds = new Set(
+    manualTraces
+      .filter((t) => MANUAL_TRACE_DEST_SUPPRESSES_AUTO_GW.has(t.connectionType))
+      .map((t) => t.destinationDeviceId)
+  )
+  return devices
+    .filter((d) => {
+      const autoKey = mapManualTraceLogicalKey(
+        MAP_GATEWAY_NODE_ID,
+        d.id,
+        AUTO_GATEWAY_EDGE_CONNECTION_TYPE
+      )
+      if (manualKeysExact.has(autoKey)) return false
+      if (nonPowerManualDestinationDeviceIds.has(d.id)) return false
+      return true
+    })
+    .map((d) => ({
+      id: `e-gw-${d.id}`,
+      source: MAP_GATEWAY_NODE_ID,
+      target: d.id,
+      style: { ...MAP_EDGE_STYLE },
+      animated: false
+    }))
 }
 
 interface MapMarqueeOverlayProps {
@@ -477,6 +529,104 @@ function MapMarqueeOverlay({
     <div className="map-flow__marquee-layer" aria-hidden>
       <div className="map-flow__marquee-rect" style={{ left, top, width, height }} />
     </div>
+  )
+}
+
+interface MapTracePathDraftOverlayProps {
+  points: XYPosition[]
+  previewFlow: XYPosition | null
+  wrapEl: HTMLDivElement | null
+  flowToScreenPosition: (p: XYPosition) => XYPosition
+  /** Bumps on viewport move so screen coords track pan/zoom while drafting. */
+  viewportRev: number
+  /** Active trace family for centralized stroke tokens (presentation only). */
+  traceFamily: MapManualTraceConnectionType
+}
+
+/** In-progress trace polyline in flow space, drawn in screen space over the map wrapper (POC). */
+function MapTracePathDraftOverlay({
+  points,
+  previewFlow,
+  wrapEl,
+  flowToScreenPosition,
+  viewportRev,
+  traceFamily
+}: MapTracePathDraftOverlayProps): JSX.Element | null {
+  void viewportRev
+  if (!wrapEl) return null
+  if (points.length === 0 && previewFlow == null) return null
+  const wrap = wrapEl.getBoundingClientRect()
+  const toLocal = (p: XYPosition) => {
+    const s = flowToScreenPosition(p)
+    return { x: s.x - wrap.left, y: s.y - wrap.top }
+  }
+  const polyPts =
+    points.length >= 2 ? points.map((p) => `${toLocal(p).x},${toLocal(p).y}`).join(' ') : ''
+  const last = points.length > 0 ? toLocal(points[points.length - 1]!) : null
+  const previewLocal = previewFlow ? toLocal(previewFlow) : null
+  return (
+    <svg
+      className={draftTracePathOverlayRootClassName(traceFamily)}
+      aria-hidden
+      width={Math.max(1, wrap.width)}
+      height={Math.max(1, wrap.height)}
+    >
+      {polyPts ? (
+        <polyline className="map-trace-path-draft-overlay__poly" points={polyPts} fill="none" />
+      ) : null}
+      {last && previewLocal && points.length > 0 ? (
+        <line
+          className="map-trace-path-draft-overlay__preview"
+          x1={last.x}
+          y1={last.y}
+          x2={previewLocal.x}
+          y2={previewLocal.y}
+        />
+      ) : null}
+      {points.map((p, i) => {
+        const { x, y } = toLocal(p)
+        return <circle key={i} className="map-trace-path-draft-overlay__vertex" cx={x} cy={y} r={4} />
+      })}
+    </svg>
+  )
+}
+
+interface MapPersistedManualTracesOverlayProps {
+  traces: MapManualTrace[]
+  wrapEl: HTMLDivElement | null
+  flowToScreenPosition: (p: XYPosition) => XYPosition
+  viewportRev: number
+}
+
+/** Persisted manual traces in flow space → screen SVG (same transform path as draft path). */
+function MapPersistedManualTracesOverlay({
+  traces,
+  wrapEl,
+  flowToScreenPosition,
+  viewportRev
+}: MapPersistedManualTracesOverlayProps): JSX.Element | null {
+  void viewportRev
+  if (!wrapEl || traces.length === 0) return null
+  const wrap = wrapEl.getBoundingClientRect()
+  const toLocal = (p: XYPosition) => {
+    const s = flowToScreenPosition(p)
+    return { x: s.x - wrap.left, y: s.y - wrap.top }
+  }
+  return (
+    <svg
+      className="map-manual-traces-overlay"
+      aria-hidden
+      width={Math.max(1, wrap.width)}
+      height={Math.max(1, wrap.height)}
+    >
+      {traces.map((t) => {
+        const pts = t.path
+        if (pts.length < 2) return null
+        const polyPts = pts.map((p) => `${toLocal(p).x},${toLocal(p).y}`).join(' ')
+        const cls = persistedManualTracePolylineClassName(t.connectionType)
+        return <polyline key={t.traceId} className={cls} points={polyPts} fill="none" />
+      })}
+    </svg>
   )
 }
 
@@ -521,6 +671,9 @@ function MapCanvas({
     [onNodesChangeBase]
   )
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
+  const [persistedManualTraces, setPersistedManualTraces] = useState<MapManualTrace[]>([])
+  const persistedManualTracesRef = useRef(persistedManualTraces)
+  persistedManualTracesRef.current = persistedManualTraces
   const [savedBundle, setSavedBundle] = useState<MapLayoutBundle>({ manualGroups: [], positions: {} })
   /** Bumped when an authoritative bundle is fetched (load/invalidation). Forces rebuild from bundle. */
   const [bundleReloadTick, setBundleReloadTick] = useState(0)
@@ -551,6 +704,10 @@ function MapCanvas({
   const [pocAddDeviceOpen, setPocAddDeviceOpen] = useState(false)
   const [pocAddTileHover, setPocAddTileHover] = useState<MapPocVisualDeviceType | null>(null)
   const pocAddDeviceSurfaceRef = useRef<HTMLDivElement | null>(null)
+  /** Trace type popover (Step 11) — same outside-dismiss pattern as Add Device. */
+  const [traceTypeMenuOpen, setTraceTypeMenuOpen] = useState(false)
+  const [traceTypeMenuHover, setTraceTypeMenuHover] = useState<MapManualTraceConnectionType | null>(null)
+  const traceTypeMenuSurfaceRef = useRef<HTMLDivElement | null>(null)
   const pendingFocusCreatedDeviceIdRef = useRef<string | null>(null)
   const pocCreateCascadeRef = useRef<{ lastAt: number; step: number }>({ lastAt: 0, step: -1 })
   /** POC naming (Step 8): in-session tie-break when numbering races ON_DEVICES_CHANGED. */
@@ -685,6 +842,71 @@ function MapCanvas({
   }, [setSelectedEquipmentIds])
   /** Inspector-only: device to show while canvas keeps a locked manual group selected (see `onNodeClick`). */
   const [inspectorPeekDeviceId, setInspectorPeekDeviceId] = useState<string | null>(null)
+  /**
+   * Step 3 POC: trace authoring mode (type only). `null` = inactive. When set, `traceType` is the
+   * connection kind for a future manual trace — no path, endpoints, or persistence yet.
+   */
+  const [mapTraceAuthoring, setMapTraceAuthoring] = useState<{
+    traceType: MapManualTraceConnectionType
+  } | null>(null)
+  /** Step 4 POC: flow-space polyline while trace mode is on — not persisted or bound to devices. */
+  const [tracePathDraftPoints, setTracePathDraftPoints] = useState<XYPosition[]>([])
+  const [tracePathPreviewFlow, setTracePathPreviewFlow] = useState<XYPosition | null>(null)
+  const [tracePathViewportTick, setTracePathViewportTick] = useState(0)
+  const mapTraceAuthoringRef = useRef(mapTraceAuthoring)
+  const tracePathDraftPointsRef = useRef(tracePathDraftPoints)
+  const tracePathPreviewFlowRef = useRef(tracePathPreviewFlow)
+  mapTraceAuthoringRef.current = mapTraceAuthoring
+  tracePathDraftPointsRef.current = tracePathDraftPoints
+  tracePathPreviewFlowRef.current = tracePathPreviewFlow
+  /** Step 5: first device click binds source; path is frozen until commit or cancel. */
+  const [traceEndpointSourceId, setTraceEndpointSourceId] = useState<string | null>(null)
+  const [tracePocCommitFeedback, setTracePocCommitFeedback] = useState<TracePocCommitFeedback>(null)
+  const [traceCommitSaving, setTraceCommitSaving] = useState(false)
+  const tracePocFeedbackTimerRef = useRef<number | null>(null)
+
+  const dismissTracePocCommitFeedback = useCallback(() => {
+    if (tracePocFeedbackTimerRef.current != null) {
+      window.clearTimeout(tracePocFeedbackTimerRef.current)
+      tracePocFeedbackTimerRef.current = null
+    }
+    setTracePocCommitFeedback(null)
+  }, [])
+
+  const presentTracePocCommitFeedback = useCallback(
+    (fb: Exclude<TracePocCommitFeedback, null>, dismissMs: number) => {
+      if (tracePocFeedbackTimerRef.current != null) {
+        window.clearTimeout(tracePocFeedbackTimerRef.current)
+        tracePocFeedbackTimerRef.current = null
+      }
+      setTracePocCommitFeedback(fb)
+      tracePocFeedbackTimerRef.current = window.setTimeout(() => {
+        tracePocFeedbackTimerRef.current = null
+        setTracePocCommitFeedback(null)
+      }, dismissMs)
+    },
+    []
+  )
+
+  useEffect(() => {
+    return () => {
+      if (tracePocFeedbackTimerRef.current != null) {
+        window.clearTimeout(tracePocFeedbackTimerRef.current)
+      }
+    }
+  }, [])
+  const traceEndpointSourceRef = useRef<string | null>(null)
+  traceEndpointSourceRef.current = traceEndpointSourceId
+  /** Step 12: proximity highlight target for visible trace snaps (presentation only). */
+  const [traceSnapHover, setTraceSnapHover] = useState<TraceSnapHoverTarget | null>(null)
+  const traceSnapHoverRef = useRef<TraceSnapHoverTarget | null>(null)
+  traceSnapHoverRef.current = traceSnapHover
+  const traceCommitInFlightRef = useRef(false)
+  /**
+   * Bumped when trace authoring is reset (exit, network change, type switch) so an in-flight save
+   * cannot clear a newly started draft or clobber state after the user left trace mode.
+   */
+  const tracePoCEpochRef = useRef(0)
 
   const canCenterOnSelection = useMemo(() => {
     const ids = mapSelectionToViewportNodeIds(mapSelection, layoutMode)
@@ -755,11 +977,13 @@ function MapCanvas({
     const nid = networkId?.trim() ?? ''
     if (!nid) {
       setSavedBundle({ manualGroups: [], positions: {} })
+      setPersistedManualTraces([])
       return
     }
-    void api.getMapLayout(nid).then((bundle) => {
+    void Promise.all([api.getMapLayout(nid), api.getMapManualTraces(nid)]).then(([bundle, traces]) => {
       if (cancelled) return
       setSavedBundle(bundle)
+      setPersistedManualTraces(traces)
       setBundleReloadTick((t) => t + 1)
     })
     return () => {
@@ -767,14 +991,15 @@ function MapCanvas({
     }
   }, [api, networkId])
 
-  /** Peer window (or same) saved layout to SQLite — reload authoritative bundle (existing `savedBundle` → nodes path). */
+  /** Peer window (or same) saved layout / manual traces — reload authoritative data. */
   useEffect(() => {
     return api.onMapLayoutInvalidated((p) => {
       const nid = networkId?.trim() ?? ''
       if (!nid) return
       if (!normalizedNetworkId || p.networkId !== normalizedNetworkId) return
-      void api.getMapLayout(nid).then((bundle) => {
+      void Promise.all([api.getMapLayout(nid), api.getMapManualTraces(nid)]).then(([bundle, traces]) => {
         setSavedBundle(bundle)
+        setPersistedManualTraces(traces)
         setBundleReloadTick((t) => t + 1)
       })
     })
@@ -1291,7 +1516,7 @@ function MapCanvas({
     if (layoutMode !== 'manual') {
       setNodesState(buildAutoLayoutNodes(devices, layoutMode, gw))
       setMapGraphRebuildTick((t) => t + 1)
-      setEdges(buildEdges(devices))
+      setEdges(buildEdges(devices, persistedManualTraces))
       prevLayoutModeRef.current = layoutMode
       return
     }
@@ -1325,14 +1550,24 @@ function MapCanvas({
         effectiveBundle,
         gw,
         groupHandlers.current,
-        deviceLayoutHandlersRef.current
+        deviceLayoutHandlersRef.current,
+        traceSnapHoverRef.current
       )
     )
     setMapGraphRebuildTick((t) => t + 1)
-    setEdges(buildEdges(devices))
+    setEdges(buildEdges(devices, persistedManualTraces))
     prevLayoutModeRef.current = layoutMode
     prevBundleReloadTickRef.current = bundleReloadTick
-  }, [bundleReloadTick, devices, layoutMode, savedBundle, networkInfo?.gateway, setEdges, setNodesState])
+  }, [
+    bundleReloadTick,
+    devices,
+    layoutMode,
+    persistedManualTraces,
+    savedBundle,
+    networkInfo?.gateway,
+    setEdges,
+    setNodesState
+  ])
 
   useEffect(() => {
     if (layoutMode === 'manual') return
@@ -1441,7 +1676,10 @@ function MapCanvas({
       }
       setPocAddDeviceOpen(false)
       setPocAddTileHover(null)
+      setTraceTypeMenuOpen(false)
+      setTraceTypeMenuHover(null)
       setInspectorPeekDeviceId(null)
+      setMapTraceAuthoring(null)
       const next = clearSelection()
       setMapSelection(next)
       commitSharedEquipmentFromMapSelection(next)
@@ -1465,10 +1703,166 @@ function MapCanvas({
     return () => document.removeEventListener('pointerdown', onPointerDown, true)
   }, [pocAddDeviceOpen])
 
+  useEffect(() => {
+    if (!traceTypeMenuOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      const root = traceTypeMenuSurfaceRef.current
+      const t = e.target
+      if (!root || !(t instanceof Node)) return
+      if (root.contains(t)) return
+      setTraceTypeMenuHover(null)
+      setTraceTypeMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [traceTypeMenuOpen])
+
+  useEffect(() => {
+    if (!mapTraceAuthoring) {
+      setTraceTypeMenuOpen(false)
+      setTraceTypeMenuHover(null)
+    }
+  }, [mapTraceAuthoring])
+
   /**
    * Capture layout at drag start; `onNodeDragStop` compares to final layout and pushes one history entry.
    * No entries during pointermove — only after drag completes (manual mode).
    */
+  const commitManualTracePoc = useCallback(
+    async (sourceDeviceId: string, destinationDeviceId: string): Promise<boolean> => {
+      const auth = mapTraceAuthoring
+      if (!auth || traceCommitInFlightRef.current) return false
+      const path = tracePathDraftPointsRef.current
+      if (path.length < 1) {
+        const msg =
+          'Add at least one point on the empty map (click the canvas), then choose the source device again.'
+        presentTracePocCommitFeedback({ variant: 'invalid', message: msg }, 8000)
+        console.warn('[map trace POC]', msg)
+        return false
+      }
+      if (sourceDeviceId === destinationDeviceId) {
+        const msg = 'Destination must be a different device than the source.'
+        presentTracePocCommitFeedback({ variant: 'invalid', message: msg }, 8000)
+        console.warn('[map trace POC]', msg)
+        return false
+      }
+      const srcDev = devices.find((d) => d.id === sourceDeviceId)
+      const dstDev = devices.find((d) => d.id === destinationDeviceId)
+      if (!srcDev || !dstDev) {
+        const msg = 'One of the devices is no longer on this map. Refresh the layout or pick devices again.'
+        presentTracePocCommitFeedback({ variant: 'invalid', message: msg }, 8000)
+        console.warn('[map trace POC]', msg)
+        return false
+      }
+      if (auth.traceType === 'Power' && srcDev.deviceType !== 'Router') {
+        const msg = 'Power traces (POC): the source device must be a Router.'
+        presentTracePocCommitFeedback({ variant: 'invalid', message: msg }, 8000)
+        console.warn('[map trace POC]', msg)
+        return false
+      }
+      const nid = networkId?.trim()
+      if (!nid) {
+        const msg = 'Select a network in the app header before saving a trace.'
+        presentTracePocCommitFeedback({ variant: 'invalid', message: msg }, 8000)
+        console.warn('[map trace POC]', msg)
+        return false
+      }
+      const snaps = inferSnapIdsForManualTrace(auth.traceType)
+      const wrap = flowWrapRef.current
+      const srcAnchor =
+        wrap != null
+          ? getTraceSnapAnchorFlowPosition(wrap, screenToFlowPosition, sourceDeviceId, snaps.sourceSnapPointId)
+          : null
+      const dstAnchor =
+        wrap != null
+          ? getTraceSnapAnchorFlowPosition(
+              wrap,
+              screenToFlowPosition,
+              destinationDeviceId,
+              snaps.destinationSnapPointId
+            )
+          : null
+      let pathForSave: { x: number; y: number }[]
+      if (path.length === 1) {
+        pathForSave =
+          srcAnchor != null && dstAnchor != null
+            ? [{ x: srcAnchor.x, y: srcAnchor.y }, { x: dstAnchor.x, y: dstAnchor.y }]
+            : path.map((p) => ({ x: p.x, y: p.y }))
+      } else {
+        pathForSave = path.map((p) => ({ x: p.x, y: p.y }))
+        if (srcAnchor != null) pathForSave[0] = { x: srcAnchor.x, y: srcAnchor.y }
+        if (dstAnchor != null && pathForSave.length >= 2) {
+          pathForSave[pathForSave.length - 1] = { x: dstAnchor.x, y: dstAnchor.y }
+        }
+      }
+      const epochAtStart = tracePoCEpochRef.current
+      traceCommitInFlightRef.current = true
+      setTraceCommitSaving(true)
+      try {
+        await api.upsertMapManualTrace({
+          networkId: nid,
+          sourceDeviceId,
+          destinationDeviceId,
+          connectionType: auth.traceType,
+          sourceSnapPointId: snaps.sourceSnapPointId,
+          destinationSnapPointId: snaps.destinationSnapPointId,
+          path: pathForSave
+        })
+        if (tracePoCEpochRef.current !== epochAtStart) {
+          presentTracePocCommitFeedback(
+            {
+              variant: 'info',
+              message:
+                'Trace mode or network changed while saving. This attempt was not stored — try again if you still need the trace.'
+            },
+            7200
+          )
+          return false
+        }
+        setTracePathDraftPoints([])
+        setTracePathPreviewFlow(null)
+        setTraceEndpointSourceId(null)
+        presentTracePocCommitFeedback(
+          {
+            variant: 'success',
+            message:
+              'Your manual trace was saved for this network. You can draw another path or exit trace mode (Esc or Cancel trace).'
+          },
+          5600
+        )
+        return true
+      } catch (e) {
+        if (tracePoCEpochRef.current === epochAtStart) {
+          const detail = e instanceof Error ? e.message : String(e)
+          presentTracePocCommitFeedback(
+            {
+              variant: 'error',
+              message:
+                detail.trim().length > 0
+                  ? `${detail} If this repeats, check connectivity and try again.`
+                  : 'The save request failed. If this repeats, check connectivity and try again.'
+            },
+            10000
+          )
+          console.warn('[map trace POC] save failed', detail)
+        }
+        return false
+      } finally {
+        traceCommitInFlightRef.current = false
+        setTraceCommitSaving(false)
+      }
+    },
+    [api, devices, mapTraceAuthoring, networkId, presentTracePocCommitFeedback, screenToFlowPosition]
+  )
+
+  /** Connection-type toggle mid-authoring: reset endpoint + hint so bindings match the active type. */
+  const applyTraceAuthoringConnectionType = useCallback((traceType: MapManualTraceConnectionType) => {
+    tracePoCEpochRef.current += 1
+    setMapTraceAuthoring({ traceType })
+    setTraceEndpointSourceId(null)
+    dismissTracePocCommitFeedback()
+  }, [dismissTracePocCommitFeedback])
+
   const onNodeDragStart = useCallback(
     (_: unknown, node: Node) => {
       if (layoutModeRef.current !== 'manual') {
@@ -1567,6 +1961,57 @@ function MapCanvas({
   const onNodeClick = useCallback(
     (_e: React.MouseEvent, node: Node) => {
       const nds = getNodes()
+      if (
+        node.type === 'device' &&
+        mapTraceAuthoring &&
+        tracePathDraftPoints.length > 0
+      ) {
+        if (!traceEndpointSourceId) {
+          dismissTracePocCommitFeedback()
+          setTraceEndpointSourceId(node.id)
+          const authSnap = mapTraceAuthoring
+          const wrapEl = flowWrapRef.current
+          if (authSnap && wrapEl) {
+            const snaps = inferSnapIdsForManualTrace(authSnap.traceType)
+            const anchor = getTraceSnapAnchorFlowPosition(
+              wrapEl,
+              screenToFlowPosition,
+              node.id,
+              snaps.sourceSnapPointId
+            )
+            if (anchor) {
+              setTracePathDraftPoints((prev) => {
+                if (prev.length === 0) return prev
+                const nextPts = [...prev]
+                nextPts[0] = { x: anchor.x, y: anchor.y }
+                return nextPts
+              })
+            }
+          }
+          setInspectorPeekDeviceId(null)
+          const next = selectDevice(node.id)
+          setMapSelection(next)
+          commitSharedEquipmentFromMapSelection(next)
+          return
+        }
+        if (node.id === traceEndpointSourceId) {
+          const msg = 'Pick a different device as the destination (not the source).'
+          presentTracePocCommitFeedback({ variant: 'invalid', message: msg }, 8000)
+          console.warn('[map trace POC]', msg)
+          return
+        }
+        dismissTracePocCommitFeedback()
+        const srcId = traceEndpointSourceId
+        void (async () => {
+          const ok = await commitManualTracePoc(srcId, node.id)
+          if (!ok) return
+          setInspectorPeekDeviceId(null)
+          const next = selectDevice(node.id)
+          setMapSelection(next)
+          commitSharedEquipmentFromMapSelection(next)
+        })()
+        return
+      }
       if (node.type === 'device') {
         if (deviceChildOfLockedManualGroup(node, nds) && node.parentId) {
           const next = selectManualGroup(node.parentId)
@@ -1592,7 +2037,18 @@ function MapCanvas({
         setMapSelection(selectGateway())
       }
     },
-    [commitSharedEquipmentFromMapSelection, getNodes, setSelectedEquipmentIds]
+    [
+      commitManualTracePoc,
+      commitSharedEquipmentFromMapSelection,
+      dismissTracePocCommitFeedback,
+      getNodes,
+      mapTraceAuthoring,
+      presentTracePocCommitFeedback,
+      screenToFlowPosition,
+      setSelectedEquipmentIds,
+      traceEndpointSourceId,
+      tracePathDraftPoints.length
+    ]
   )
 
   const onNodeContextMenu = useCallback(
@@ -1615,22 +2071,90 @@ function MapCanvas({
     [api]
   )
 
-  const onPaneClick = useCallback(() => {
-    if (suppressNextPaneClickClearRef.current) {
-      suppressNextPaneClickClearRef.current = false
+  const onPaneClick = useCallback(
+    (event: ReactMouseEvent) => {
+      if (suppressNextPaneClickClearRef.current) {
+        suppressNextPaneClickClearRef.current = false
+        blurNonInputFocusInMap()
+        return
+      }
+      if (mapTraceAuthoring) {
+        if (!traceEndpointSourceRef.current) {
+          const p = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+          setTracePathDraftPoints((prev) => [...prev, p])
+        }
+        setInspectorPeekDeviceId(null)
+        const next = clearSelection()
+        setMapSelection(next)
+        commitSharedEquipmentFromMapSelection(next)
+        blurNonInputFocusInMap()
+        return
+      }
+      setInspectorPeekDeviceId(null)
+      const next = clearSelection()
+      setMapSelection(next)
+      commitSharedEquipmentFromMapSelection(next)
       blurNonInputFocusInMap()
-      return
-    }
-    setInspectorPeekDeviceId(null)
-    const next = clearSelection()
-    setMapSelection(next)
-    commitSharedEquipmentFromMapSelection(next)
-    blurNonInputFocusInMap()
-  }, [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection])
+    },
+    [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection, mapTraceAuthoring, screenToFlowPosition]
+  )
 
   useEffect(() => {
     marqueeActiveRef.current = marqueeFlow != null
   }, [marqueeFlow])
+
+  useEffect(() => {
+    if (layoutMode !== 'manual') setMapTraceAuthoring(null)
+  }, [layoutMode])
+
+  /** Switching LAN exits trace authoring; `mapTraceAuthoring` effect bumps epoch once paths clear. */
+  useEffect(() => {
+    setMapTraceAuthoring(null)
+  }, [networkId])
+
+  useEffect(() => {
+    if (!mapTraceAuthoring) {
+      tracePoCEpochRef.current += 1
+      setTracePathDraftPoints([])
+      setTracePathPreviewFlow(null)
+      setTraceEndpointSourceId(null)
+      dismissTracePocCommitFeedback()
+      setTraceSnapHover(null)
+      setTraceCommitSaving(false)
+    }
+  }, [dismissTracePocCommitFeedback, mapTraceAuthoring])
+
+  /** Drop stale snap highlight when source binding or trace family changes (inferred target snap id changes). */
+  useEffect(() => {
+    setTraceSnapHover(null)
+  }, [mapTraceAuthoring?.traceType, traceEndpointSourceId])
+
+  useEffect(() => {
+    if (layoutMode !== 'manual') setTraceSnapHover(null)
+  }, [layoutMode])
+
+  useEffect(() => {
+    if (layoutMode !== 'manual') return
+    setNodesState((prev) => {
+      let changed = false
+      const nextNodes = prev.map((n) => {
+        if (n.type !== 'device') return n
+        const dd = n.data as DeviceNodeData
+        const next = traceSnapHover
+        const prevH = dd.traceSnapHover ?? null
+        const same =
+          (prevH == null && next == null) ||
+          (prevH != null &&
+            next != null &&
+            prevH.deviceId === next.deviceId &&
+            prevH.snapPointId === next.snapPointId)
+        if (same) return n
+        changed = true
+        return { ...n, data: { ...dd, traceSnapHover: next } }
+      })
+      return changed ? nextNodes : prev
+    })
+  }, [traceSnapHover, layoutMode, setNodesState])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1659,10 +2183,22 @@ function MapCanvas({
     if (marqueeActiveRef.current) setMarqueeViewportTick((n) => n + 1)
   }, [])
 
+  const onViewportMoveForOverlays = useCallback(() => {
+    onMarqueeViewportMove()
+    if (
+      (mapTraceAuthoringRef.current &&
+        (tracePathDraftPointsRef.current.length > 0 || tracePathPreviewFlowRef.current != null)) ||
+      persistedManualTracesRef.current.length > 0
+    ) {
+      setTracePathViewportTick((n) => n + 1)
+    }
+  }, [onMarqueeViewportMove])
+
   const onMapFlowPointerDownCapture = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (layoutModeRef.current !== 'manual' || e.button !== 0 || !e.isPrimary) return
       if (spacePressedRef.current) return
+      if (mapTraceAuthoringRef.current) return
       const t = e.target
       if (!(t instanceof HTMLElement)) return
       if (t.closest('.react-flow__node')) return
@@ -1686,6 +2222,33 @@ function MapCanvas({
 
   const onMapFlowPointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      const auth = mapTraceAuthoringRef.current
+      const wrap = flowWrapRef.current
+      if (auth && wrap && layoutModeRef.current === 'manual') {
+        const hit = pickTraceSnapHoverTarget(
+          e.clientX,
+          e.clientY,
+          wrap,
+          auth.traceType,
+          traceEndpointSourceRef.current
+        )
+        setTraceSnapHover((prev) => {
+          if (prev?.deviceId === hit?.deviceId && prev?.snapPointId === hit?.snapPointId) return prev
+          return hit
+        })
+      } else {
+        setTraceSnapHover((prev) => (prev ? null : prev))
+      }
+      if (mapTraceAuthoringRef.current && tracePathDraftPointsRef.current.length > 0) {
+        const t = e.target
+        if (
+          t instanceof HTMLElement &&
+          !t.closest('.map-flow-viewport-panel') &&
+          flowWrapRef.current?.contains(t)
+        ) {
+          setTracePathPreviewFlow(screenToFlowPosition({ x: e.clientX, y: e.clientY }))
+        }
+      }
       if (marqueePointerIdRef.current !== e.pointerId || !marqueeDraftRef.current) return
       if (spacePressedRef.current) return
       const startClient = marqueeStartClientRef.current
@@ -1782,11 +2345,12 @@ function MapCanvas({
         { manualGroups: [], positions: {} },
         gw,
         groupHandlers.current,
-        deviceLayoutHandlersRef.current
+        deviceLayoutHandlersRef.current,
+        null
       )
     )
     setMapGraphRebuildTick((t) => t + 1)
-    setEdges(buildEdges(devices))
+    setEdges(buildEdges(devices, persistedManualTraces))
     window.setTimeout(() => fitView({ padding: 0.2, duration: 200 }), 60)
   }, [
     api,
@@ -1796,6 +2360,7 @@ function MapCanvas({
     layoutMode,
     networkId,
     networkInfo?.gateway,
+    persistedManualTraces,
     setEdges,
     setMapGraphRebuildTick,
     setMapSelection,
@@ -2107,6 +2672,10 @@ function MapCanvas({
               setPocAddDeviceOpen((v) => {
                 const next = !v
                 if (!next) setPocAddTileHover(null)
+                if (next) {
+                  setTraceTypeMenuOpen(false)
+                  setTraceTypeMenuHover(null)
+                }
                 return next
               })
             }
@@ -2195,6 +2764,131 @@ function MapCanvas({
             </div>
           ) : null}
         </div>
+        {mapTraceAuthoring ? (
+          <span className="map-flow-toolbar__trace-poc" role="group" aria-label="Trace authoring (POC)">
+            <div ref={traceTypeMenuSurfaceRef} style={{ position: 'relative', display: 'inline-flex' }}>
+              <button
+                type="button"
+                className="secondary"
+                aria-haspopup="menu"
+                aria-expanded={traceTypeMenuOpen}
+                aria-label={`Trace type, current ${mapTraceAuthoring.traceType}`}
+                onClick={() =>
+                  setTraceTypeMenuOpen((open) => {
+                    const next = !open
+                    if (next) {
+                      setPocAddDeviceOpen(false)
+                      setPocAddTileHover(null)
+                    }
+                    return next
+                  })
+                }
+              >
+                Trace type…{' '}
+                <span className="muted" style={{ fontWeight: 600 }}>
+                  ({mapTraceAuthoring.traceType})
+                </span>
+              </button>
+              {traceTypeMenuOpen ? (
+                <div
+                  role="menu"
+                  aria-label="Trace connection type"
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 6px)',
+                    left: 0,
+                    zIndex: 20,
+                    background: 'var(--panel-bg, #111827)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: 10,
+                    padding: 8,
+                    minWidth: 200,
+                    boxShadow: '0 10px 30px rgba(0,0,0,0.35)'
+                  }}
+                >
+                  {(['Power', 'DMX', 'Network'] as const).map((family, i, arr) => {
+                    const suffix = traceFamilyToCssSuffix(family)
+                    const hovered = traceTypeMenuHover === family
+                    const selected = mapTraceAuthoring.traceType === family
+                    return (
+                      <button
+                        key={family}
+                        type="button"
+                        role="menuitem"
+                        aria-label={`Trace type ${family}`}
+                        aria-current={selected ? 'true' : undefined}
+                        className={`secondary map-flow-toolbar__trace-poc-btn map-flow-toolbar__trace-poc-btn--${suffix}${
+                          selected ? ' map-flow-toolbar__trace-poc-btn--selected' : ''
+                        }`}
+                        onMouseEnter={() => setTraceTypeMenuHover(family)}
+                        onMouseLeave={() => setTraceTypeMenuHover((cur) => (cur === family ? null : cur))}
+                        style={{
+                          width: '100%',
+                          display: 'block',
+                          margin: 0,
+                          marginBottom: i < arr.length - 1 ? 8 : 0,
+                          padding: '10px 12px',
+                          borderRadius: 8,
+                          border: '1px solid rgba(255,255,255,0.14)',
+                          background: hovered ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)',
+                          color: 'inherit',
+                          font: 'inherit',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          outline: 'none',
+                          boxSizing: 'border-box'
+                        }}
+                        onClick={() => {
+                          setTraceTypeMenuOpen(false)
+                          setTraceTypeMenuHover(null)
+                          applyTraceAuthoringConnectionType(family)
+                        }}
+                      >
+                        <span style={{ fontWeight: 600, lineHeight: 1.2 }}>{family}</span>
+                        {selected ? (
+                          <span className="muted" style={{ display: 'block', fontSize: 12, marginTop: 2 }}>
+                            Current
+                          </span>
+                        ) : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                setTraceTypeMenuOpen(false)
+                setTraceTypeMenuHover(null)
+                setMapTraceAuthoring(null)
+              }}
+            >
+              Cancel trace
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="secondary"
+            disabled={!manualChrome}
+            title={
+              !manualChrome
+                ? 'Switch to Manual layout to use trace mode'
+                : 'Enter trace authoring (POC): choose Power, DMX, or Network'
+            }
+            onClick={() => {
+              setPocAddDeviceOpen(false)
+              setPocAddTileHover(null)
+              dismissTracePocCommitFeedback()
+              setTraceEndpointSourceId(null)
+              setMapTraceAuthoring({ traceType: 'DMX' })
+            }}
+          >
+            Trace mode…
+          </button>
+        )}
         <button type="button" className="secondary" onClick={handleCenterView}>
           Center view
         </button>
@@ -2269,10 +2963,59 @@ function MapCanvas({
               </div>
             ) : null}
             {manualChrome ? (
-              <p className="muted map-flow__hint map-flow__hint--marquee">
-                Manual: left-drag empty space = marquee · Shift+marquee adds · middle-drag or Space+left-drag = pan ·
-                right-click = menu
-              </p>
+              <>
+                {mapTraceAuthoring ? (
+                  <div
+                    className="map-flow-trace-authoring-banner"
+                    role="status"
+                    data-trace-family={traceFamilyToCssSuffix(mapTraceAuthoring.traceType)}
+                  >
+                    <span className="map-flow-trace-authoring-banner__title">Trace authoring (POC)</span>
+                    <span className="map-flow-trace-authoring-banner__meta muted">
+                      Type <strong>{mapTraceAuthoring.traceType}</strong>
+                      {!traceEndpointSourceId
+                        ? ' · click empty map to add path points · dashed preview from last point · then click a device for source'
+                        : ' · path locked — click a different device as destination to save the trace'}
+                      {' · '}
+                      Esc or Cancel trace to exit
+                    </span>
+                    {traceCommitSaving ? (
+                      <p
+                        className="map-flow-trace-authoring-banner__busy"
+                        role="status"
+                        aria-live="polite"
+                        aria-busy="true"
+                      >
+                        Saving trace…
+                      </p>
+                    ) : null}
+                    {tracePocCommitFeedback ? (
+                      <div
+                        className={`map-flow-trace-authoring-banner__feedback map-flow-trace-authoring-banner__feedback--${tracePocCommitFeedback.variant}`}
+                        role="alert"
+                        aria-live="assertive"
+                      >
+                        <span className="map-flow-trace-authoring-banner__feedback-title">
+                          {tracePocCommitFeedback.variant === 'success'
+                            ? 'Saved'
+                            : tracePocCommitFeedback.variant === 'invalid'
+                              ? "Can't save"
+                              : tracePocCommitFeedback.variant === 'error'
+                                ? 'Save failed'
+                                : 'Notice'}
+                        </span>
+                        <span className="map-flow-trace-authoring-banner__feedback-msg">
+                          {tracePocCommitFeedback.message}
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                <p className="muted map-flow__hint map-flow__hint--marquee">
+                  Manual: left-drag empty space = marquee · Shift+marquee adds · middle-drag or Space+left-drag = pan ·
+                  right-click = menu
+                </p>
+              </>
             ) : (
               <p className="muted map-flow__hint map-flow__hint--marquee">
                 Auto view: read-only · left-drag or middle-drag empty space = pan · no marquee
@@ -2281,12 +3024,21 @@ function MapCanvas({
           </div>
           <div className="map-view-body-grid__inspector-top-spacer" aria-hidden />
           <div
-            className={`map-flow map-view-body-grid__map${!manualChrome ? ' map-flow--auto-view' : ''}`}
+            className={`map-flow map-view-body-grid__map${!manualChrome ? ' map-flow--auto-view' : ''}${mapTraceAuthoring ? ' map-flow--trace-authoring' : ''}`}
             ref={flowWrapRef}
             tabIndex={-1}
+            {...(mapTraceAuthoring
+              ? { 'data-trace-family': traceFamilyToCssSuffix(mapTraceAuthoring.traceType) }
+              : {})}
             onPointerDownCapture={onMapFlowPointerDownCapture}
             onPointerMove={onMapFlowPointerMove}
             onPointerUp={onMapFlowPointerUp}
+            onPointerLeave={() => {
+              if (mapTraceAuthoringRef.current) {
+                setTracePathPreviewFlow(null)
+                setTraceSnapHover(null)
+              }
+            }}
             onMouseDownCapture={(e) => {
               // Suppress Windows/browser middle-click autoscroll UI so RF pan works.
               if (e.button === 1) e.preventDefault()
@@ -2313,7 +3065,7 @@ function MapCanvas({
           }}
           onNodeDragStart={onNodeDragStart}
           onNodeDragStop={onNodeDragStop}
-          onMove={onMarqueeViewportMove}
+          onMove={onViewportMoveForOverlays}
           nodesDraggable={manualChrome}
           elementsSelectable={false}
           nodesFocusable={false}
@@ -2394,6 +3146,24 @@ function MapCanvas({
                 wrapEl={flowWrapRef.current}
                 flowToScreenPosition={flowToScreenPosition}
                 viewportRev={marqueeViewportTick}
+              />
+            ) : null}
+            {manualChrome && mapTraceAuthoring ? (
+              <MapTracePathDraftOverlay
+                points={tracePathDraftPoints}
+                previewFlow={tracePathPreviewFlow}
+                wrapEl={flowWrapRef.current}
+                flowToScreenPosition={flowToScreenPosition}
+                viewportRev={tracePathViewportTick}
+                traceFamily={mapTraceAuthoring.traceType}
+              />
+            ) : null}
+            {persistedManualTraces.length > 0 ? (
+              <MapPersistedManualTracesOverlay
+                traces={persistedManualTraces}
+                wrapEl={flowWrapRef.current}
+                flowToScreenPosition={flowToScreenPosition}
+                viewportRev={tracePathViewportTick}
               />
             ) : null}
           </div>

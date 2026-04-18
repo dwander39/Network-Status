@@ -23,6 +23,7 @@ import {
   deleteMapLayoutForNetwork,
   deleteMapLayoutRowsForNodeKey
 } from './mapLayoutRepository'
+import { deleteManualTracesInvolvingDevice } from './mapManualTraceRepository'
 
 /** Include mirror column only in dev — avoids shipping large JSON over IPC in production. */
 const INCLUDE_DEV_EQUIPMENT_MIRROR_JSON = process.env.NODE_ENV === 'development'
@@ -189,7 +190,10 @@ export function persistDeviceGroupId(
  */
 export function persistDeleteDeviceById(db: Database.Database, id: string): boolean {
   const r = db.prepare(`DELETE FROM devices WHERE id = ?`).run(id)
-  if (r.changes > 0) deleteMapLayoutRowsForNodeKey(db, id)
+  if (r.changes > 0) {
+    deleteMapLayoutRowsForNodeKey(db, id)
+    deleteManualTracesInvolvingDevice(db, id)
+  }
   return r.changes > 0
 }
 

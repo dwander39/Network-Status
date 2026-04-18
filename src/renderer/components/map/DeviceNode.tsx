@@ -6,7 +6,12 @@ import {
   mapPocVisualDeviceTypeLabel,
   parseMapPocVisualDeviceType
 } from '@shared/mapPocVisualDeviceTypes'
-import type { Device, DeviceType } from '@shared/types'
+import { MAP_DEVICE_SNAP_DATA_IN, MAP_DEVICE_SNAP_DATA_OUT } from '@shared/mapDeviceSnapPoints'
+import { traceFamilyToCssSuffix } from '@shared/mapTraceFamilyVisual'
+import type { TraceSnapHoverTarget } from '@shared/mapTraceSnapHoverPick'
+import type { Device, DeviceType, MapManualTraceConnectionType } from '@shared/types'
+
+const DMX_TRACE_FAMILY: MapManualTraceConnectionType = 'DMX'
 
 export type DeviceNodeData = {
   device: Device
@@ -14,6 +19,8 @@ export type DeviceNodeData = {
   mapManualLayout?: boolean
   mapDeviceCollapsed?: boolean
   onToggleMapDeviceCollapsed?: () => void
+  /** Step 12: map-local proximity highlight (presentation only). */
+  traceSnapHover?: TraceSnapHoverTarget | null
 }
 
 export type DeviceFlowNode = Node<DeviceNodeData, 'device'>
@@ -68,11 +75,45 @@ function DeviceNodeInner({ data, selected }: NodeProps<DeviceFlowNode>): JSX.Ele
 
   const collapseTitle = collapsed ? 'Expand device card' : 'Collapse device card'
 
+  const hover = data.traceSnapHover
+  const dmxInHover =
+    hover != null && hover.deviceId === d.id && hover.snapPointId === MAP_DEVICE_SNAP_DATA_IN
+  const dmxOutHover =
+    hover != null && hover.deviceId === d.id && hover.snapPointId === MAP_DEVICE_SNAP_DATA_OUT
+
   return (
     <div
       className={`map-device-node${selected ? ' map-device-node--selected' : ''}${collapsed ? ' map-device-node--collapsed' : ''}${manual && !collapsed ? ' map-device-node--manual-expanded' : ''}`}
     >
       <Handle className="map-flow__handle" type="target" position={Position.Top} />
+      <Handle
+        id={MAP_DEVICE_SNAP_DATA_IN}
+        className={`map-device-node__snap-point map-device-node__snap-point--in nodrag nopan${
+          dmxInHover ? ' map-device-node__snap-point--trace-hover' : ''
+        }`}
+        type="target"
+        position={Position.Left}
+        isConnectable={false}
+        data-trace-family={traceFamilyToCssSuffix(DMX_TRACE_FAMILY)}
+        data-device-id={d.id}
+        data-snap-point-id={MAP_DEVICE_SNAP_DATA_IN}
+        title="Trace anchor: DMX in (data-in)"
+        aria-label="Trace anchor DMX in"
+      />
+      <Handle
+        id={MAP_DEVICE_SNAP_DATA_OUT}
+        className={`map-device-node__snap-point map-device-node__snap-point--out nodrag nopan${
+          dmxOutHover ? ' map-device-node__snap-point--trace-hover' : ''
+        }`}
+        type="source"
+        position={Position.Right}
+        isConnectable={false}
+        data-trace-family={traceFamilyToCssSuffix(DMX_TRACE_FAMILY)}
+        data-device-id={d.id}
+        data-snap-point-id={MAP_DEVICE_SNAP_DATA_OUT}
+        title="Trace anchor: DMX out (data-out)"
+        aria-label="Trace anchor DMX out"
+      />
       {collapsed ? (
         <div className="map-device-node__collapsed-row">
           <span

@@ -51,9 +51,11 @@ import type {
   EventType,
   GetEventLogsQuery,
   MapLayoutSavePayload,
+  MapManualTrace,
   NewNetworkDetectedPayload,
   NetworkInfo,
   PurgeDeviceCachePayload,
+  SaveMapManualTracePayload,
   SetMapManualGroupLockPayload,
   ShowMapNodeContextMenuPayload,
   RenameMapManualGroupPayload,
@@ -74,6 +76,7 @@ import {
   upsertManualGroupLayouts,
   upsertMapLayoutPositions
 } from './db/mapLayoutRepository'
+import { listManualTracesForNetwork, upsertManualTrace } from './db/mapManualTraceRepository'
 import {
   onDiscoveryScanComplete,
   resetAlertDiscoveryBaseline
@@ -710,6 +713,34 @@ function registerIpc(): void {
       upsertManualGroupLayouts(db, nid, payload.manualGroupLayouts)
     }
     pushMapLayoutInvalidated(nid)
+  })
+
+  ipcMain.handle(IPC.UPSERT_MAP_MANUAL_TRACE, (_e, payload: SaveMapManualTracePayload) => {
+    const nid = normalizeNetworkId(payload.networkId)
+    if (!nid) throw new Error('Invalid network')
+    const src = String(payload.sourceDeviceId ?? '').trim()
+    const dst = String(payload.destinationDeviceId ?? '').trim()
+    if (!src || !dst) throw new Error('Source and destination devices are required')
+    if (src === dst) throw new Error('Source and destination must be different devices')
+    if (!Array.isArray(payload.path) || payload.path.length === 0) throw new Error('Path must have at least one point')
+    const db = getDatabase()
+    const row = upsertManualTrace(db, {
+      networkId: nid,
+      sourceDeviceId: src,
+      destinationDeviceId: dst,
+      connectionType: payload.connectionType,
+      sourceSnapPointId: String(payload.sourceSnapPointId ?? '').trim(),
+      destinationSnapPointId: String(payload.destinationSnapPointId ?? '').trim(),
+      path: payload.path
+    })
+    pushMapLayoutInvalidated(nid)
+    return row
+  })
+
+  ipcMain.handle(IPC.GET_MAP_MANUAL_TRACES, (_e, networkId: string) => {
+    const nid = normalizeNetworkId(networkId)
+    if (!nid) return [] as MapManualTrace[]
+    return listManualTracesForNetwork(getDatabase(), nid)
   })
 
   ipcMain.handle(IPC.CREATE_MAP_MANUAL_GROUP, (_e, payload: CreateMapManualGroupPayload) => {

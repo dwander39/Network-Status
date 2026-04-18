@@ -64,6 +64,8 @@ export function getDatabase(): Database.Database {
   migrateAlertRulesEventLogSeverityColumn(db)
   migrateMapLayoutSchema(db)
   migrateMapManualGroupsSchema(db)
+  migrateMapManualTracesSchema(db)
+  migrateMapManualTraceDataToDmx(db)
   migrateDeviceTypeCustomSchema(db)
   migrateEquipmentValuesMirrorColumn(db)
   migrateEventLogsSchema(db)
@@ -440,6 +442,34 @@ function migrateMapManualGroupsSchema(database: Database.Database): void {
       `ALTER TABLE map_layout_positions ADD COLUMN map_device_collapsed INTEGER NOT NULL DEFAULT 0`
     )
   }
+}
+
+/**
+ * User-drawn typed traces between devices (POC). Does not replace or alter automatic map edges;
+ * at most one manual trace per logical `(network, source, destination, connectionType)` for future precedence.
+ */
+function migrateMapManualTracesSchema(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS map_manual_traces (
+      id TEXT PRIMARY KEY,
+      network_id TEXT NOT NULL,
+      source_device_id TEXT NOT NULL,
+      destination_device_id TEXT NOT NULL,
+      connection_type TEXT NOT NULL,
+      source_snap_point_id TEXT NOT NULL,
+      destination_snap_point_id TEXT NOT NULL,
+      path_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(network_id, source_device_id, destination_device_id, connection_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_map_manual_traces_network ON map_manual_traces(network_id);
+  `)
+}
+
+/** v1.1: rename persisted trace kind `Data` → `DMX` (unique keys + precedence stay aligned). */
+function migrateMapManualTraceDataToDmx(database: Database.Database): void {
+  database.exec(`UPDATE map_manual_traces SET connection_type = 'DMX' WHERE connection_type = 'Data'`)
 }
 
 function migrateAlertRulesSchema(database: Database.Database): void {

@@ -356,6 +356,46 @@ export interface MapLayoutBundle {
   positions: MapLayoutSnapshot
 }
 
+/** User-authored connection line on the map (POC); orthogonal to automatic gateway→device edges. */
+export type MapManualTraceConnectionType = 'Power' | 'DMX' | 'Network'
+
+/** One vertex in flow-space for a persisted manual trace polyline. */
+export interface MapTracePoint2D {
+  x: number
+  y: number
+}
+
+/**
+ * Manual trace for a logical device-to-device link (`source` → `destination`) with typed connection.
+ * Snap point ids are opaque placeholders until snap authoring exists; they still anchor endpoints in data.
+ *
+ * Precedence (future): at most one row per `(networkId, sourceDeviceId, destinationDeviceId, connectionType)`
+ * in SQLite — consumers can prefer that row over any automatic geometry for the same logical key.
+ */
+export interface MapManualTrace {
+  readonly kind: 'manual'
+  traceId: string
+  /** Same scoping as `map_layout_positions` / map surfaces. */
+  networkId: string
+  sourceDeviceId: string
+  destinationDeviceId: string
+  connectionType: MapManualTraceConnectionType
+  sourceSnapPointId: string
+  destinationSnapPointId: string
+  path: MapTracePoint2D[]
+}
+
+/** IPC payload to upsert one manual trace row (POC). */
+export interface SaveMapManualTracePayload {
+  networkId: string
+  sourceDeviceId: string
+  destinationDeviceId: string
+  connectionType: MapManualTraceConnectionType
+  sourceSnapPointId: string
+  destinationSnapPointId: string
+  path: MapTracePoint2D[]
+}
+
 export interface CreateMapManualGroupPayload {
   networkId: string
   name: string

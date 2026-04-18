@@ -85,6 +85,22 @@
   --map-marquee-fill: rgb(94 129 172 / 0.12);
   --map-marquee-border: rgb(94 129 172 / 0.55);
 
+  /*
+   * Map typed trace families (v1.1) — default strokes / UI chrome only.
+   * Logic and identity use `connectionType` / snap metadata; components must not infer type from these colors.
+   */
+  --map-trace-family-power-stroke: #ef4444;
+  --map-trace-family-power-fill-soft: rgb(239 68 68 / 0.12);
+  --map-trace-family-power-chrome-soft: rgb(239 68 68 / 0.33);
+
+  --map-trace-family-dmx-stroke: #3b82f6;
+  --map-trace-family-dmx-fill-soft: rgb(59 130 246 / 0.12);
+  --map-trace-family-dmx-chrome-soft: rgb(59 130 246 / 0.33);
+
+  --map-trace-family-network-stroke: #f97316;
+  --map-trace-family-network-fill-soft: rgb(249 115 22 / 0.12);
+  --map-trace-family-network-chrome-soft: rgb(249 115 22 / 0.33);
+
   --color-status-unknown: #94a3b8;
   --color-danger-glow: rgb(239 68 68 / 0.53);
 

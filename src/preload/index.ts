@@ -12,6 +12,7 @@ import type {
   EquipmentMirrorVerifyScanSummary,
   MapLayoutBundle,
   MapManualGroup,
+  MapManualTrace,
   NetworkAdapter,
   NetworkInfo,
   NetworkProfile,
@@ -27,6 +28,7 @@ import type {
   SaveDevicePayload,
   MapLayoutInvalidatedPayload,
   MapLayoutSavePayload,
+  SaveMapManualTracePayload,
   MapManualGroupLayoutActionPayload,
   SelectedEquipmentIdsChangedPayload
 } from '@shared/types'
@@ -95,6 +97,10 @@ const api = {
     ipcRenderer.invoke(IPC.SAVE_MAP_LAYOUT, payload),
   resetMapLayout: (networkId: string): Promise<void> =>
     ipcRenderer.invoke(IPC.RESET_MAP_LAYOUT, networkId),
+  upsertMapManualTrace: (payload: SaveMapManualTracePayload): Promise<MapManualTrace> =>
+    ipcRenderer.invoke(IPC.UPSERT_MAP_MANUAL_TRACE, payload),
+  getMapManualTraces: (networkId: string): Promise<MapManualTrace[]> =>
+    ipcRenderer.invoke(IPC.GET_MAP_MANUAL_TRACES, networkId),
   createMapManualGroup: (payload: CreateMapManualGroupPayload): Promise<MapManualGroup> =>
     ipcRenderer.invoke(IPC.CREATE_MAP_MANUAL_GROUP, payload),
   renameMapManualGroup: (payload: RenameMapManualGroupPayload): Promise<void> =>

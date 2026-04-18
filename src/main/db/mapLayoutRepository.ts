@@ -9,6 +9,7 @@ import type {
   MapManualGroupLayoutInput,
   RenameMapManualGroupPayload
 } from '@shared/types'
+import { deleteAllManualTraces, deleteManualTracesForNetwork } from './mapManualTraceRepository'
 
 /** DB / React Flow id for the synthetic gateway node (not a devices row). */
 export const MAP_LAYOUT_GATEWAY_KEY = '__gateway__'
@@ -221,9 +222,11 @@ export function deleteMapLayoutRowsForNodeKey(db: Database.Database, nodeKey: st
 export function deleteMapLayoutForNetwork(db: Database.Database, networkId: string): void {
   db.prepare(`DELETE FROM map_layout_positions WHERE network_id = ?`).run(networkId)
   db.prepare(`DELETE FROM map_manual_groups WHERE network_id = ?`).run(networkId)
+  deleteManualTracesForNetwork(db, networkId)
 }
 
 export function deleteAllMapLayout(db: Database.Database): void {
   db.prepare(`DELETE FROM map_layout_positions`).run()
   db.prepare(`DELETE FROM map_manual_groups`).run()
+  deleteAllManualTraces(db)
 }

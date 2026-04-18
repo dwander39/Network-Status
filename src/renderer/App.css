@@ -1288,6 +1288,87 @@ tr:last-child td {
   overflow: hidden;
 }
 
+/* Step 4 POC: in-progress trace polyline while authoring (flow → screen via RF helpers). */
+.map-trace-path-draft-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  overflow: visible;
+  border-radius: inherit;
+}
+
+.map-trace-path-draft-overlay__poly {
+  stroke-width: 2px;
+}
+
+.map-trace-path-draft-overlay__preview {
+  stroke-width: 1.5px;
+  stroke-dasharray: 6 4;
+  opacity: 0.88;
+}
+
+.map-trace-path-draft-overlay__vertex {
+  stroke: var(--color-surface);
+  stroke-width: 1px;
+}
+
+/* Draft stroke/fill from centralized trace-family tokens (modifier on SVG root). */
+.map-trace-path-draft-overlay--power .map-trace-path-draft-overlay__poly,
+.map-trace-path-draft-overlay--power .map-trace-path-draft-overlay__preview {
+  stroke: var(--map-trace-family-power-stroke);
+}
+
+.map-trace-path-draft-overlay--power .map-trace-path-draft-overlay__vertex {
+  fill: var(--map-trace-family-power-stroke);
+}
+
+.map-trace-path-draft-overlay--dmx .map-trace-path-draft-overlay__poly,
+.map-trace-path-draft-overlay--dmx .map-trace-path-draft-overlay__preview {
+  stroke: var(--map-trace-family-dmx-stroke);
+}
+
+.map-trace-path-draft-overlay--dmx .map-trace-path-draft-overlay__vertex {
+  fill: var(--map-trace-family-dmx-stroke);
+}
+
+.map-trace-path-draft-overlay--network .map-trace-path-draft-overlay__poly,
+.map-trace-path-draft-overlay--network .map-trace-path-draft-overlay__preview {
+  stroke: var(--map-trace-family-network-stroke);
+}
+
+.map-trace-path-draft-overlay--network .map-trace-path-draft-overlay__vertex {
+  fill: var(--map-trace-family-network-stroke);
+}
+
+/* Persisted manual traces (flow → screen); distinct from draft (warning) and RF auto edges (accent). */
+.map-manual-traces-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  overflow: visible;
+  border-radius: inherit;
+}
+
+.map-manual-traces-overlay__poly--dmx {
+  stroke: var(--map-trace-family-dmx-stroke);
+  stroke-width: 2.25px;
+  opacity: 0.92;
+}
+
+.map-manual-traces-overlay__poly--network {
+  stroke: var(--map-trace-family-network-stroke);
+  stroke-width: 2.25px;
+  opacity: 0.92;
+}
+
+.map-manual-traces-overlay__poly--power {
+  stroke: var(--map-trace-family-power-stroke);
+  stroke-width: 2.25px;
+  opacity: 0.92;
+}
+
 .map-flow__marquee-rect {
   position: absolute;
   box-sizing: border-box;
@@ -1583,6 +1664,59 @@ tr:last-child td {
   border: 1px solid var(--color-border);
 }
 
+/* Predefined manual-trace anchors (left/right); distinct from top/bottom gateway edge handles. */
+.map-device-node__snap-point {
+  width: 10px !important;
+  height: 10px !important;
+  border-radius: 50% !important;
+  background: var(--color-success) !important;
+  border: 2px solid var(--color-surface) !important;
+  box-shadow: 0 0 0 1px var(--color-border-strong);
+  z-index: 1;
+}
+
+.map-device-node__snap-point--in {
+  left: -5px !important;
+}
+
+.map-device-node__snap-point--out {
+  right: -5px !important;
+}
+
+/* DMX anchors on device nodes — fill matches centralized DMX trace stroke (identity is DMX by definition here). */
+.map-device-node__snap-point[data-trace-family='dmx'] {
+  background: var(--map-trace-family-dmx-stroke) !important;
+  box-shadow: 0 0 0 1px var(--map-trace-family-dmx-chrome-soft);
+}
+
+/* Step 12: proximity hover ring (trace authoring — uses family tokens; identity from snap metadata). */
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover[data-trace-family='power'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--map-trace-family-power-chrome-soft),
+    0 0 18px var(--map-trace-family-power-stroke);
+}
+
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover[data-trace-family='dmx'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--map-trace-family-dmx-chrome-soft),
+    0 0 18px var(--map-trace-family-dmx-stroke);
+}
+
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover[data-trace-family='network'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--map-trace-family-network-chrome-soft),
+    0 0 18px var(--map-trace-family-network-stroke);
+}
+
 .map-flow-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -1646,6 +1780,168 @@ tr:last-child td {
 
 .map-flow-readonly-banner__meta {
   line-height: var(--line-height-snug);
+}
+
+/* Step 3 POC: trace authoring mode (type selection only); chrome from `data-trace-family` + design tokens */
+.map-flow-trace-authoring-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-sunken);
+  font-size: var(--font-size-md);
+}
+
+.map-flow-trace-authoring-banner[data-trace-family='power'] {
+  border-color: var(--map-trace-family-power-chrome-soft);
+  background: var(--map-trace-family-power-fill-soft);
+}
+
+.map-flow-trace-authoring-banner[data-trace-family='dmx'] {
+  border-color: var(--map-trace-family-dmx-chrome-soft);
+  background: var(--map-trace-family-dmx-fill-soft);
+}
+
+.map-flow-trace-authoring-banner[data-trace-family='network'] {
+  border-color: var(--map-trace-family-network-chrome-soft);
+  background: var(--map-trace-family-network-fill-soft);
+}
+
+.map-flow-trace-authoring-banner__title {
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-ui);
+  color: var(--color-text-label);
+}
+
+.map-flow-trace-authoring-banner[data-trace-family='power'] .map-flow-trace-authoring-banner__title {
+  color: var(--map-trace-family-power-stroke);
+}
+
+.map-flow-trace-authoring-banner[data-trace-family='dmx'] .map-flow-trace-authoring-banner__title {
+  color: var(--map-trace-family-dmx-stroke);
+}
+
+.map-flow-trace-authoring-banner[data-trace-family='network'] .map-flow-trace-authoring-banner__title {
+  color: var(--map-trace-family-network-stroke);
+}
+
+.map-flow-trace-authoring-banner__meta {
+  line-height: var(--line-height-snug);
+}
+
+/* Step 14: in-flight save + discriminated feedback (success / invalid / error / info) */
+.map-flow-trace-authoring-banner__busy {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-info);
+  background: rgb(94 129 172 / 0.15);
+  font-size: var(--font-size-ui);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-info);
+}
+
+.map-flow-trace-authoring-banner__feedback {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.map-flow-trace-authoring-banner__feedback-title {
+  font-size: var(--font-size-ui);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.01em;
+}
+
+.map-flow-trace-authoring-banner__feedback-msg {
+  font-size: var(--font-size-body-sm);
+  line-height: var(--line-height-snug);
+  color: var(--color-text);
+}
+
+.map-flow-trace-authoring-banner__feedback--success {
+  border-color: rgb(34 197 94 / 0.45);
+  background: rgb(34 197 94 / 0.12);
+}
+
+.map-flow-trace-authoring-banner__feedback--success .map-flow-trace-authoring-banner__feedback-title {
+  color: var(--color-success);
+}
+
+.map-flow-trace-authoring-banner__feedback--invalid {
+  border-color: var(--color-warning-border-soft);
+  background: var(--color-warning-bg-soft);
+}
+
+.map-flow-trace-authoring-banner__feedback--invalid .map-flow-trace-authoring-banner__feedback-title {
+  color: var(--color-warning-text);
+}
+
+.map-flow-trace-authoring-banner__feedback--error {
+  border-color: rgb(248 113 113 / 0.45);
+  background: rgb(248 113 113 / 0.1);
+}
+
+.map-flow-trace-authoring-banner__feedback--error .map-flow-trace-authoring-banner__feedback-title {
+  color: var(--color-error);
+}
+
+.map-flow-trace-authoring-banner__feedback--info {
+  border-color: var(--color-info);
+  background: rgb(94 129 172 / 0.12);
+}
+
+.map-flow-trace-authoring-banner__feedback--info .map-flow-trace-authoring-banner__feedback-title {
+  color: var(--color-info);
+}
+
+.map-flow--trace-authoring {
+  outline-offset: -2px;
+  border-radius: var(--radius-lg);
+}
+
+.map-flow--trace-authoring[data-trace-family='power'] {
+  outline: 2px solid var(--map-trace-family-power-chrome-soft);
+}
+
+.map-flow--trace-authoring[data-trace-family='dmx'] {
+  outline: 2px solid var(--map-trace-family-dmx-chrome-soft);
+}
+
+.map-flow--trace-authoring[data-trace-family='network'] {
+  outline: 2px solid var(--map-trace-family-network-chrome-soft);
+}
+
+.map-flow-toolbar__trace-poc {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.map-flow-toolbar__trace-poc-btn--selected.map-flow-toolbar__trace-poc-btn--power {
+  border-color: var(--map-trace-family-power-chrome-soft) !important;
+  background: var(--map-trace-family-power-fill-soft) !important;
+  color: var(--map-trace-family-power-stroke) !important;
+}
+
+.map-flow-toolbar__trace-poc-btn--selected.map-flow-toolbar__trace-poc-btn--dmx {
+  border-color: var(--map-trace-family-dmx-chrome-soft) !important;
+  background: var(--map-trace-family-dmx-fill-soft) !important;
+  color: var(--map-trace-family-dmx-stroke) !important;
+}
+
+.map-flow-toolbar__trace-poc-btn--selected.map-flow-toolbar__trace-poc-btn--network {
+  border-color: var(--map-trace-family-network-chrome-soft) !important;
+  background: var(--map-trace-family-network-fill-soft) !important;
+  color: var(--map-trace-family-network-stroke) !important;
 }
 
 /* Ephemeral auto-group frame (not persisted — differs from dashed manual groups) */
