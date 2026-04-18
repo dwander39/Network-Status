@@ -48,6 +48,7 @@ import {
   applyMarqueeMapSelection,
   clearSelection,
   deviceChildOfLockedManualGroup,
+  getDeviceIdsInMapGroup,
   initialMapSelection,
   mapSelectionToSharedEquipmentIds,
   mapSelectionDeviceCount,
@@ -1509,16 +1510,18 @@ function MapCanvas({
       } else if (node.type === 'manualGroup') {
         setInspectorPeekDeviceId(null)
         setMapSelection(selectManualGroup(node.id))
+        setSelectedEquipmentIds(getDeviceIdsInMapGroup(node.id, nds))
       } else if (node.type === 'autoGroup') {
         setInspectorPeekDeviceId(null)
         const p = parseAutoGroupNodeId(node.id)
         if (p) setMapSelection(selectAutoGroup(p.groupKey, p.autoGroupBy))
+        setSelectedEquipmentIds(getDeviceIdsInMapGroup(node.id, nds))
       } else if (node.type === 'gateway' || node.id === MAP_GATEWAY_NODE_ID) {
         setInspectorPeekDeviceId(null)
         setMapSelection(selectGateway())
       }
     },
-    [commitSharedEquipmentFromMapSelection, getNodes]
+    [commitSharedEquipmentFromMapSelection, getNodes, setSelectedEquipmentIds]
   )
 
   const onNodeContextMenu = useCallback(

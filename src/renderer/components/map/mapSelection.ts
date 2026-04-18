@@ -121,6 +121,26 @@ export function selectAutoGroup(groupKey: string, autoGroupBy: MapAutoGroupBy): 
 }
 
 /**
+ * Map View group expansion (v1): member **device** ids for a manual or auto group from the **live**
+ * React Flow graph only. Persisted `manualGroupId` in the layout bundle is not consulted here.
+ *
+ * Rule: `node.type === 'device'` and `node.parentId === groupId` (where `groupId` is the parent
+ * group's React Flow node id — a manual-group UUID or an `auto:…` id).
+ */
+export function getDeviceIdsInMapGroup(groupId: string, nodes: readonly Node[] | null | undefined): string[] {
+  if (typeof groupId !== 'string' || groupId.length === 0) return []
+  if (!nodes || nodes.length === 0) return []
+  const out: string[] = []
+  for (const n of nodes) {
+    if (n == null || typeof n !== 'object') continue
+    if (n.type !== 'device') continue
+    if (n.parentId !== groupId) continue
+    out.push(n.id)
+  }
+  return out
+}
+
+/**
  * Apply marquee hit lists: replace selection, or merge with current when `additive` (Shift).
  * Preserves groups, devices, and gateway across additive merges.
  */
