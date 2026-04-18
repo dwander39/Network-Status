@@ -148,7 +148,6 @@ export function DeviceTable({
     const row = document.querySelector(`[data-device-row="${d.id}"]`)
     row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
     setSelectedRowIds(new Set([d.id]))
-    anchorRef.current = d.id
     setEditing({ id: d.id, field: 'name' })
     setDraft(String(d.name ?? ''))
     onFocusNameEditHandled?.()
@@ -366,9 +365,9 @@ export function DeviceTable({
   }
 
   /**
-   * Plain click (no modifiers): that row only; if already selected, deselect it (anchor rules below).
-   * Ctrl/Cmd: toggle row; anchor = row.
-   * Shift (no Ctrl/Cmd): range anchor→row if anchor set; else same as plain; anchor unchanged on range (pivot).
+   * Plain click (no modifiers): exactly that row selected, all others cleared; anchor = row (v1.1: only plain + drag start set anchor).
+   * Ctrl/Cmd: toggle row (does not update anchor).
+   * Shift (no Ctrl/Cmd): range anchor→row if anchor set; else same as plain selection (does not update anchor).
    * After drag, row onClick may bail out (skipNextRowClickRef) so this is not called on the release click.
    */
   function applyRowMouseSelection(id: string, e: MouseEvent<Element>): void {
@@ -379,13 +378,11 @@ export function DeviceTable({
       const anchor = anchorRef.current
       if (anchor == null) {
         setSelectedRowIds(new Set([id]))
-        anchorRef.current = id
         return
       }
       const range = inclusiveDeviceIdRange(orderedVisibleDeviceIds, anchor, id)
       if (range == null) {
         setSelectedRowIds(new Set([id]))
-        anchorRef.current = id
         return
       }
       setSelectedRowIds(range)
@@ -397,35 +394,8 @@ export function DeviceTable({
         const next = new Set(prev)
         if (next.has(id)) next.delete(id)
         else next.add(id)
-        anchorRef.current = next.size === 0 ? null : id
         return next
       })
-      return
-    }
-
-    // Plain path: no Shift-range, no Ctrl/Cmd (handled above), no Alt — deselect if already selected.
-    if (!e.altKey && selectedRowIds.has(id)) {
-      const next = new Set(selectedRowIds)
-      next.delete(id)
-      const wasAnchor = anchorRef.current === id
-      setSelectedRowIds(next)
-
-      if (next.size === 0) {
-        anchorRef.current = null
-      } else if (wasAnchor) {
-        let fallback: string | null = null
-        for (let i = orderedVisibleDeviceIds.length - 1; i >= 0; i--) {
-          const oid = orderedVisibleDeviceIds[i]
-          if (oid !== undefined && next.has(oid)) {
-            fallback = oid
-            break
-          }
-        }
-        if (fallback == null && next.size > 0) {
-          fallback = [...next].sort((a, b) => a.localeCompare(b)).at(-1) ?? null
-        }
-        anchorRef.current = fallback
-      }
       return
     }
 
@@ -444,6 +414,28 @@ export function DeviceTable({
       return next
     })
   }, [devices])
+
+  useEffect(() => {
+    if (anchorRef.current != null && !selectedRowIds.has(anchorRef.current)) {
+      anchorRef.current = null
+    }
+  }, [selectedRowIds])
+
+  /** Step 3 (v1.1): selection and anchor stay consistent with rows currently shown in the table body. */
+  useEffect(() => {
+    const visible = new Set(orderedVisibleDeviceIds)
+    if (anchorRef.current != null && !visible.has(anchorRef.current)) {
+      anchorRef.current = null
+    }
+    setSelectedRowIds((prev) => {
+      const next = new Set<string>()
+      for (const id of prev) {
+        if (visible.has(id)) next.add(id)
+      }
+      if (next.size === prev.size && [...prev].every((id) => next.has(id))) return prev
+      return next
+    })
+  }, [orderedVisibleDeviceIds, selectedRowIds])
 
   useEffect(() => {
     return () => {
@@ -497,6 +489,7 @@ export function DeviceTable({
     dragBaseSelectionRef.current =
       mode === 'add' || mode === 'subtract' ? new Set(selectedRowIds) : null
     dragStartRowIndexRef.current = idx
+    anchorRef.current = orderedVisibleDeviceIds[idx] ?? d.id
     dragStartPointerRef.current = { x: e.clientX, y: e.clientY }
     dragCurrentRangeRef.current = null
     dragPassedThresholdRef.current = false
@@ -515,6 +508,7 @@ export function DeviceTable({
         dragPassedThresholdRef.current = true
         window.addEventListener('selectstart', preventNativeSelectWhileDeviceTableDrag, true)
       }
+      // Step 5 (v1.1): past movement threshold for this move; early returns below do not set applied/suppression.
 
       const el = document.elementFromPoint(ev.clientX, ev.clientY)
       const rowEl = el?.closest?.('[data-device-row]') as HTMLElement | null
@@ -546,15 +540,18 @@ export function DeviceTable({
         for (const rid of rangeIds) next.add(rid)
         setSelectedRowIds(next)
       } else if (mode === 'subtract') {
-        const next = new Set(dragBaseSelectionRef.current ?? [])
-        for (const rid of rangeIds) next.delete(rid)
+        // Step 4 (v1.1): subtract only from the pointerdown snapshot — never live selectedRowIds.
+        // Delete only range ids that were in that base; unselected rows in the range are untouched.
+        const base = dragBaseSelectionRef.current ?? new Set<string>()
+        const next = new Set(base)
+        for (const rid of rangeIds) {
+          if (base.has(rid)) next.delete(rid)
+        }
         setSelectedRowIds(next)
       } else {
         setSelectedRowIds(rangeIds)
       }
-      // Step 5: drag-start row = Shift pivot after gesture (replace, add, subtract). Subtract may
-      // remove that row from selectedRowIds; anchor id still identifies the gesture pivot for Shift+click.
-      anchorRef.current = startId
+      // Step 5 (v1.1): real drag-applied selection this frame → end() may arm post-drag click skip only then.
       dragSelectionAppliedRef.current = true
     }
     dragPointerMoveFnRef.current = move
@@ -567,21 +564,12 @@ export function DeviceTable({
         window.removeEventListener('pointermove', mv)
         dragPointerMoveFnRef.current = null
       }
-      // Real drag (threshold crossed + at least one range apply): selection is already the last
-      // pointermove result for replace, add, and subtract modes; keep it and suppress the follow-up
-      // click so it does not plain-select, Shift-range, or Ctrl/Cmd-toggle away that result (Alt on
-      // release would otherwise hit the plain-click path in applyRowMouseSelection).
+      // Step 5 (v1.1): applied only if a move committed selection after crossing threshold; sub-threshold
+      // gesture never sets applied, so skipNextRowClickRef is not armed and the row click runs normally.
+      // When applied, selection is the last pointermove result; suppress release click (plain/modifiers/Alt).
       const applied = dragSelectionAppliedRef.current
       dragSelectionAppliedRef.current = false
       if (applied) {
-        // Step 5: reaffirm drag-start as anchor after pointerup (replace, add, subtract). Pivot
-        // stays drag-start even if subtract cleared or emptied selection; post-drag skip prevents
-        // applyRowMouseSelection on release from overwriting anchor/selection.
-        const si = dragStartRowIndexRef.current
-        if (si != null) {
-          const sid = orderedVisibleDeviceIdsRef.current[si]
-          if (sid) anchorRef.current = sid
-        }
         skipNextRowClickRef.current = true
         // Bubble on window runs after React's delegated row click, so the row can see skip first.
         window.addEventListener(
@@ -781,7 +769,7 @@ export function DeviceTable({
                     className={selectedRowIds.has(d.id) ? 'device-row device-row--selected' : 'device-row'}
                     onPointerDown={(e) => handleDeviceRowPointerDown(d, e)}
                     onClick={(e) => {
-                      // Step 3: skip blocks all of applyRowMouseSelection (incl. plain deselect) after drag.
+                      // After drag, skip blocks applyRowMouseSelection on the release click.
                       if (skipNextRowClickRef.current) {
                         skipNextRowClickRef.current = false
                         return
