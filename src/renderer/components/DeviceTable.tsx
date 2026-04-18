@@ -296,7 +296,6 @@ export function DeviceTable({
   const visibleExtraColumns = extraColumns.filter((c) => !isHidden(c))
   const colKeys = [
     'name',
-    'group',
     'status',
     'ip',
     'subnet',
@@ -347,7 +346,6 @@ export function DeviceTable({
         <thead>
           <tr>
             {!isHidden('name') ? th('name', label('name', 'Name'), { sortable: true, onClick: () => onSort('name') }) : null}
-            {!isHidden('group') ? th('group', label('group', 'Group'), { sortable: true, onClick: () => onSort('group') }) : null}
             {!isHidden('status') ? th('status', label('status', 'Status'), { sortable: true, onClick: () => onSort('status') }) : null}
             {!isHidden('ip') ? th('ip', 'IP') : null}
             {!isHidden('subnet') ? th('subnet', 'Subnet') : null}
@@ -453,26 +451,6 @@ export function DeviceTable({
                   >
                     {!isHidden('name') ? (
                       <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'name')}</td>
-                    ) : null}
-                    {!isHidden('group') ? (
-                      <td onMouseDown={(e) => e.stopPropagation()}>
-                        <select
-                          className="table-select"
-                          aria-label={`Group for ${d.name}`}
-                          value={d.groupId ?? ''}
-                          onChange={(e) => {
-                            const v = e.target.value
-                            void onSetDeviceGroup(d.id, v === '' ? null : v)
-                          }}
-                        >
-                          <option value="">— None —</option>
-                          {groups.map((gg) => (
-                            <option key={gg.id} value={gg.id}>
-                              {gg.name}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
                     ) : null}
                     {!isHidden('status') ? (
                       <td>

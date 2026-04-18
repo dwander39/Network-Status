@@ -384,7 +384,6 @@ export function App(): JSX.Element {
             <div className="columns-panel__grid">
               {[
                 { key: 'name', label: 'Name' },
-                { key: 'group', label: 'Group' },
                 { key: 'status', label: 'Status' },
                 { key: 'ip', label: 'IP' },
                 { key: 'subnet', label: 'Subnet' },
