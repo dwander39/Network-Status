@@ -95,14 +95,36 @@ body {
   margin-top: 0;
 }
 
+/* List body: horizontal row — left rail + main column (toolbar + table). */
 .list-page__zones {
   display: flex;
   gap: var(--space-5);
   align-items: flex-start;
 }
 
-.list-page__right {
-  display: block;
+/* List View: rail + main only (no detail column); center flexes to fill remaining width. */
+.list-page__zones--rail-and-table {
+  flex-wrap: nowrap;
+}
+
+.list-page__zones--rail-and-table > .list-page__left {
+  flex-shrink: 0;
+}
+
+.list-page__zones--rail-and-table > .list-page__center {
+  flex: 1 1 0%;
+  min-width: 0;
+}
+
+.list-page__zones--rail-and-table .list-page__table-area {
+  width: 100%;
+  min-width: 0;
+}
+
+.list-page__zones--rail-and-table .list-page__table-area__inner {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .list-page__left {
@@ -131,12 +153,6 @@ body {
 
 .list-page__work-actions {
   margin-bottom: var(--space-4);
-}
-
-.list-page__right {
-  flex: 0 0 auto;
-  border-left: 1px solid var(--color-border-muted);
-  padding-left: var(--space-5);
 }
 
 h1 {
@@ -390,43 +406,16 @@ button:disabled {
   border-radius: var(--radius-lg);
 }
 
-.list-view-split {
+/* List main column: hosts DeviceTable at full width of the center column. */
+.list-page__table-area {
   display: flex;
   gap: var(--space-6);
   align-items: flex-start;
 }
 
-.list-view-split__table {
+.list-page__table-area__inner {
   flex: 1;
   min-width: 0;
-}
-
-.list-inspector {
-  width: 340px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface);
-  padding: var(--space-5);
-}
-
-.list-inspector__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-
-.list-inspector__row {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-5);
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--color-border-muted);
-}
-
-.list-inspector__row:last-child {
-  border-bottom: none;
 }
 
 .device-row--selected td {
@@ -441,6 +430,18 @@ table {
 
 .device-table {
   table-layout: fixed;
+}
+
+/* List DeviceTable: Shift+click range must not trigger native text selection on cell text. */
+.device-table tbody td {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.device-table tbody td input.table-input,
+.device-table tbody td textarea {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .device-th {

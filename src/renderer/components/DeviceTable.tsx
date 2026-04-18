@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { getDeviceTypeDisplayLabel } from '@shared/deviceTypeDisplay'
 import type { Device, DeviceGroup, DeviceStatus, SaveDevicePayload } from '@shared/types'
 import { isValidIPv4 } from '@shared/ipValidation'
@@ -30,8 +30,6 @@ interface Props {
   /** When set and the device row is present, open inline edit on the Name cell once (e.g. after Add device). */
   focusNameEditDeviceId?: string | null
   onFocusNameEditHandled?: () => void
-  selectedDeviceId?: string | null
-  onSelectDevice?: (id: string) => void
 }
 
 function statusClass(s: DeviceStatus): string {
@@ -69,10 +67,11 @@ export function DeviceTable({
   onSetColumnWidthPx,
   hiddenColumns,
   focusNameEditDeviceId,
-  onFocusNameEditHandled,
-  selectedDeviceId,
-  onSelectDevice
+  onFocusNameEditHandled
 }: Props): JSX.Element {
+  /** Multi-select + range (Shift); anchor in ref for synchronous reads with selection updates. */
+  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set())
+  const anchorRef = useRef<string | null>(null)
   const [editing, setEditing] = useState<{ id: string; field: EditableField } | null>(null)
   const [draft, setDraft] = useState('')
   const [editingExtra, setEditingExtra] = useState<{ id: string; col: string } | null>(null)
@@ -107,6 +106,8 @@ export function DeviceTable({
     if (!d) return
     const row = document.querySelector(`[data-device-row="${d.id}"]`)
     row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    setSelectedRowIds(new Set([d.id]))
+    anchorRef.current = d.id
     setEditing({ id: d.id, field: 'name' })
     setDraft(String(d.name ?? ''))
     onFocusNameEditHandled?.()
@@ -186,7 +187,11 @@ export function DeviceTable({
         <span
           className="cell-editable"
           title="Click to edit"
-          onClick={() => startEditCell(d, field)}
+          onClick={(e) => {
+            applyRowMouseSelection(d.id, e)
+            if (!e.shiftKey && !selectionModifier(e)) startEditCell(d, field)
+            e.stopPropagation()
+          }}
         >
           {/* Phase-1 resolved read contract: empty string is meaningful; do not coerce to absence/placeholder. */}
           {d[field]}
@@ -220,11 +225,14 @@ export function DeviceTable({
           className="cell-editable"
           title="Click to edit"
           onClick={(e) => {
+            applyRowMouseSelection(d.id, e)
+            if (!e.shiftKey && !selectionModifier(e)) {
+              setEditing(null)
+              setDraft('')
+              setEditingExtra({ id: d.id, col })
+              setDraftExtra(v)
+            }
             e.stopPropagation()
-            setEditing(null)
-            setDraft('')
-            setEditingExtra({ id: d.id, col })
-            setDraftExtra(v)
           }}
         >
           {v}
@@ -292,6 +300,81 @@ export function DeviceTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [devices, groupBy])
 
+  /** Device row ids in current table body order (group headers excluded). */
+  const orderedVisibleDeviceIds = useMemo(() => {
+    const ids: string[] = []
+    for (const g of grouped) {
+      for (const d of g.devices) ids.push(d.id)
+    }
+    return ids
+  }, [grouped])
+
+  function inclusiveDeviceIdRange(order: readonly string[], a: string, b: string): Set<string> | null {
+    const ia = order.indexOf(a)
+    const ib = order.indexOf(b)
+    if (ia === -1 || ib === -1) return null
+    const lo = Math.min(ia, ib)
+    const hi = Math.max(ia, ib)
+    return new Set(order.slice(lo, hi + 1))
+  }
+
+  function selectionModifier(e: MouseEvent<Element>): boolean {
+    return e.metaKey || e.ctrlKey
+  }
+
+  /**
+   * Plain click: only that row; anchor = row.
+   * Ctrl/Cmd: toggle row; anchor = row.
+   * Shift (no Ctrl/Cmd): range anchor→row if anchor set; else same as plain; anchor unchanged on range (pivot).
+   */
+  function applyRowMouseSelection(id: string, e: MouseEvent<Element>): void {
+    const mod = selectionModifier(e)
+    const shiftOnly = e.shiftKey && !mod
+
+    if (shiftOnly) {
+      const anchor = anchorRef.current
+      if (anchor == null) {
+        setSelectedRowIds(new Set([id]))
+        anchorRef.current = id
+        return
+      }
+      const range = inclusiveDeviceIdRange(orderedVisibleDeviceIds, anchor, id)
+      if (range == null) {
+        setSelectedRowIds(new Set([id]))
+        anchorRef.current = id
+        return
+      }
+      setSelectedRowIds(range)
+      return
+    }
+
+    if (mod) {
+      setSelectedRowIds((prev) => {
+        const next = new Set(prev)
+        if (next.has(id)) next.delete(id)
+        else next.add(id)
+        anchorRef.current = next.size === 0 ? null : id
+        return next
+      })
+      return
+    }
+
+    setSelectedRowIds(new Set([id]))
+    anchorRef.current = id
+  }
+
+  useEffect(() => {
+    const allowed = new Set(devices.map((d) => d.id))
+    if (anchorRef.current != null && !allowed.has(anchorRef.current)) {
+      anchorRef.current = null
+    }
+    setSelectedRowIds((prev) => {
+      const next = new Set([...prev].filter((id) => allowed.has(id)))
+      if (next.size === prev.size && [...prev].every((id) => next.has(id))) return prev
+      return next
+    })
+  }, [devices])
+
   const isHidden = (k: string): boolean => hiddenColumns?.[k] === true
   const visibleExtraColumns = extraColumns.filter((c) => !isHidden(c))
   const colKeys = [
@@ -334,8 +417,24 @@ export function DeviceTable({
     )
   }
 
+  function handleTableWrapMouseDown(e: MouseEvent<HTMLDivElement>): void {
+    const tgt = e.target as HTMLElement
+    if (tgt.closest('[data-device-row]')) return
+    if (tgt.closest('thead')) return
+    if (tgt.closest('button, input, select, textarea')) return
+    if (tgt.closest('table.device-table')) {
+      setSelectedRowIds(new Set())
+      anchorRef.current = null
+      return
+    }
+    if (e.target === e.currentTarget) {
+      setSelectedRowIds(new Set())
+      anchorRef.current = null
+    }
+  }
+
   return (
-    <div className="table-wrap">
+    <div className="table-wrap" onMouseDown={handleTableWrapMouseDown}>
       <table className="device-table">
         <colgroup>
           {colKeys.map((k) => {
@@ -446,8 +545,8 @@ export function DeviceTable({
                   <tr
                     key={d.id}
                     data-device-row={d.id}
-                    className={selectedDeviceId === d.id ? 'device-row device-row--selected' : 'device-row'}
-                    onClick={() => onSelectDevice?.(d.id)}
+                    className={selectedRowIds.has(d.id) ? 'device-row device-row--selected' : 'device-row'}
+                    onClick={(e) => applyRowMouseSelection(d.id, e)}
                   >
                     {!isHidden('name') ? (
                       <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'name')}</td>
@@ -471,11 +570,7 @@ export function DeviceTable({
                       <td onMouseDown={(e) => e.stopPropagation()}>{renderEditableCell(d, 'gateway')}</td>
                     ) : null}
                     {visibleExtraColumns.map((c) => (
-                      <td
-                        key={`${d.id}\u0000${c}`}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => e.stopPropagation()}
-                      >
+                      <td key={`${d.id}\u0000${c}`}>
                         {renderExtraColumnCell(d, c)}
                       </td>
                     ))}

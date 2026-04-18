@@ -89,7 +89,6 @@ export function App(): JSX.Element {
   const [newNetwork, setNewNetwork] = useState<import('@shared/types').NewNetworkDetectedPayload | null>(null)
   const [mainView, setMainView] = useState<MainViewMode>(initialMainViewFromLocation)
   const [focusNameEditDeviceId, setFocusNameEditDeviceId] = useState<string | null>(null)
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
   const [addMultipleOpen, setAddMultipleOpen] = useState(false)
   const [addMultipleCount, setAddMultipleCount] = useState('3')
   const [extraColumns, setExtraColumns] = useState<string[]>([])
@@ -97,13 +96,6 @@ export function App(): JSX.Element {
   const [columnWidthsPx, setColumnWidthsPx] = useState<Record<string, number>>({})
   const [hiddenColumns, setHiddenColumns] = useState<Record<string, boolean>>({})
   const [columnsPanelOpen, setColumnsPanelOpen] = useState(false)
-  const [inspectorDraft, setInspectorDraft] = useState<Pick<SaveDevicePayload, 'name' | 'ip' | 'subnet' | 'gateway'>>({
-    name: '',
-    ip: '',
-    subnet: '',
-    gateway: ''
-  })
-  const [inspectorSaving, setInspectorSaving] = useState(false)
 
   const viewingHistoricalProfile = viewingProfile != null && viewingProfile.isActive === false
   const savedIps = useMemo(() => new Set(devices.map((d) => d.ip)), [devices])
@@ -226,21 +218,6 @@ export function App(): JSX.Element {
     if (filter === 'offline') list = list.filter((x) => x.lastStatus === 'offline')
     return sortDevices(list, sortKey, sortDir)
   }, [devices, viewingHistoricalProfile, filter, sortKey, sortDir])
-
-  const selectedDevice = useMemo(() => {
-    if (!selectedDeviceId) return null
-    return devices.find((d) => d.id === selectedDeviceId) ?? null
-  }, [devices, selectedDeviceId])
-
-  useEffect(() => {
-    if (!selectedDevice) return
-    setInspectorDraft({
-      name: selectedDevice.name,
-      ip: selectedDevice.ip,
-      subnet: selectedDevice.subnet,
-      gateway: selectedDevice.gateway
-    })
-  }, [selectedDevice?.id, selectedDevice?.name, selectedDevice?.ip, selectedDevice?.subnet, selectedDevice?.gateway])
 
   if (loadError) {
     return (
@@ -595,7 +572,7 @@ export function App(): JSX.Element {
             </div>
           </div>
           <div className="list-page__content">
-            <div className="list-page__zones">
+            <div className="list-page__zones list-page__zones--rail-and-table">
               <div className="list-page__left">
                 <button
                   type="button"
@@ -653,8 +630,8 @@ export function App(): JSX.Element {
                     Open Map View Window
                   </button>
                 </div>
-                <div className="list-view-split">
-                  <div className="list-view-split__table">
+                <div className="list-page__table-area">
+                  <div className="list-page__table-area__inner">
                     <DeviceTable
                       devices={filtered}
                       groups={groups}
@@ -742,113 +719,9 @@ export function App(): JSX.Element {
                       }}
                       focusNameEditDeviceId={focusNameEditDeviceId}
                       onFocusNameEditHandled={onFocusNameEditHandled}
-                      selectedDeviceId={selectedDeviceId}
-                      onSelectDevice={(id) => setSelectedDeviceId(id)}
                     />
                   </div>
                 </div>
-              </div>
-              <div className="list-page__right">
-                <aside className="list-inspector" aria-label="Device details">
-                  {selectedDevice ? (
-                    <>
-                      <div className="list-inspector__header">
-                        <strong>Device</strong>
-                        <button type="button" onClick={() => setSelectedDeviceId(null)}>
-                          Close
-                        </button>
-                      </div>
-                      <div className="list-inspector__body">
-                        <div className="list-inspector__row">
-                          <span className="muted">Name</span>
-                          <input
-                            className="table-input"
-                            type="text"
-                            value={inspectorDraft.name}
-                            disabled={inspectorSaving}
-                            onChange={(e) => setInspectorDraft((d) => ({ ...d, name: e.target.value }))}
-                          />
-                        </div>
-                        <div className="list-inspector__row">
-                          <span className="muted">IP</span>
-                          <input
-                            className="table-input"
-                            type="text"
-                            value={inspectorDraft.ip}
-                            disabled={inspectorSaving}
-                            onChange={(e) => setInspectorDraft((d) => ({ ...d, ip: e.target.value }))}
-                          />
-                        </div>
-                        <div className="list-inspector__row">
-                          <span className="muted">Subnet</span>
-                          <input
-                            className="table-input"
-                            type="text"
-                            value={inspectorDraft.subnet}
-                            disabled={inspectorSaving}
-                            onChange={(e) => setInspectorDraft((d) => ({ ...d, subnet: e.target.value }))}
-                          />
-                        </div>
-                        <div className="list-inspector__row">
-                          <span className="muted">Gateway</span>
-                          <input
-                            className="table-input"
-                            type="text"
-                            value={inspectorDraft.gateway}
-                            disabled={inspectorSaving}
-                            onChange={(e) => setInspectorDraft((d) => ({ ...d, gateway: e.target.value }))}
-                          />
-                        </div>
-                        <div className="list-inspector__row">
-                          <span className="muted">Save</span>
-                          <button
-                            type="button"
-                            disabled={inspectorSaving}
-                            onClick={() => {
-                              void (async () => {
-                                setInspectorSaving(true)
-                                try {
-                                  const next = await api.saveDevice({
-                                    id: selectedDevice.id,
-                                    name: inspectorDraft.name,
-                                    ip: inspectorDraft.ip,
-                                    subnet: inspectorDraft.subnet,
-                                    gateway: inspectorDraft.gateway,
-                                    groupId: selectedDevice.groupId
-                                  })
-                                  setInspectorDraft({
-                                    name: next.name,
-                                    ip: next.ip,
-                                    subnet: next.subnet,
-                                    gateway: next.gateway
-                                  })
-                                } catch (e) {
-                                  alert(e instanceof Error ? e.message : 'Save failed.')
-                                } finally {
-                                  setInspectorSaving(false)
-                                }
-                              })()
-                            }}
-                          >
-                            Save
-                          </button>
-                        </div>
-                        <div className="list-inspector__row">
-                          <span className="muted">Status</span>
-                          <span>{selectedDevice.lastStatus}</span>
-                        </div>
-                        <div className="list-inspector__row">
-                          <span className="muted">Last checked</span>
-                          <span>
-                            {selectedDevice.lastChecked ? new Date(selectedDevice.lastChecked).toLocaleString() : '—'}
-                          </span>
-                        </div>
-                      </div>
-                    </>
-                  ) : (
-                    <p className="muted">Select a device to view details.</p>
-                  )}
-                </aside>
               </div>
             </div>
           </div>
