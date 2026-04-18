@@ -328,110 +328,54 @@ export function App(): JSX.Element {
         <div className="banner banner-warn">{networkSwitchMessage}</div>
       ) : null}
 
-      <div className="toolbar">
-        <button
-          type="button"
-          onClick={() => {
-            void (async () => {
-              try {
-                for (let attempt = 0; attempt < 16; attempt++) {
-                  const b = new Uint8Array(1)
-                  crypto.getRandomValues(b)
-                  const ip = `203.0.113.${2 + (b[0] % 253)}`
-                  try {
-                    const created = await api.saveDevice({
-                      name: 'New device',
-                      ip,
-                      subnet: '',
-                      gateway: ''
-                    })
-                    setFocusNameEditDeviceId(created.id)
-                    return
-                  } catch (e) {
-                    const msg = e instanceof Error ? e.message : String(e)
-                    if (msg.includes('already')) continue
-                    throw e
+      {mainView === 'map' ? (
+        <div className="toolbar">
+          <button
+            type="button"
+            onClick={() => {
+              void (async () => {
+                try {
+                  for (let attempt = 0; attempt < 16; attempt++) {
+                    const b = new Uint8Array(1)
+                    crypto.getRandomValues(b)
+                    const ip = `203.0.113.${2 + (b[0] % 253)}`
+                    try {
+                      const created = await api.saveDevice({
+                        name: 'New device',
+                        ip,
+                        subnet: '',
+                        gateway: ''
+                      })
+                      setFocusNameEditDeviceId(created.id)
+                      return
+                    } catch (e) {
+                      const msg = e instanceof Error ? e.message : String(e)
+                      if (msg.includes('already')) continue
+                      throw e
+                    }
                   }
+                  throw new Error('Could not add device')
+                } catch (e) {
+                  alert(e instanceof Error ? e.message : 'Could not add device')
                 }
-                throw new Error('Could not add device')
-              } catch (e) {
-                alert(e instanceof Error ? e.message : 'Could not add device')
-              }
-            })()
-          }}
-        >
-          Add device
-        </button>
-        {mainView === 'list' ? (
-          <button
-            type="button"
-            onClick={() => {
-              setAddMultipleOpen(true)
+              })()
             }}
           >
-            Add Multiple…
+            Add device
           </button>
-        ) : null}
-        {mainView === 'list' ? (
-          <button
-            type="button"
-            onClick={() => {
-              setExtraColumns((cols) => cols.concat(`Column ${cols.length + 1}`))
-            }}
-          >
-            Add Column
+          <button type="button" onClick={() => void api.openMapViewWindow()}>
+            Open Map View Window
           </button>
-        ) : null}
-        {mainView === 'list' ? (
-          <button
-            type="button"
-            onClick={() => {
-              setColumnsPanelOpen((v) => !v)
-            }}
-          >
-            Columns…
-          </button>
-        ) : null}
-        <button type="button" onClick={() => void api.openMapViewWindow()}>
-          Open Map View Window
-        </button>
-        {mainView === 'list' ? (
-          <>
-            <label>
-              Filter
-              <select
-                value={filter}
-                onChange={(e) => setFilter(e.target.value as FilterMode)}
-              >
-                <option value="all">All</option>
-                <option value="online">Online only</option>
-                <option value="offline">Offline only</option>
-              </select>
-            </label>
-            <label>
-              Group by
-              <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupByMode)}>
-                <option value="none">None</option>
-                <option value="subnet">Subnet</option>
-                <option value="vendor">Vendor</option>
-                <option value="deviceType">Device type</option>
-              </select>
-            </label>
-          </>
-        ) : (
           <label>
             Filter
-            <select
-              value={filter}
-              onChange={(e) => setFilter(e.target.value as FilterMode)}
-            >
+            <select value={filter} onChange={(e) => setFilter(e.target.value as FilterMode)}>
               <option value="all">All</option>
               <option value="online">Online only</option>
               <option value="offline">Offline only</option>
             </select>
           </label>
-        )}
-      </div>
+        </div>
+      ) : null}
 
       {mainView === 'list' && columnsPanelOpen ? (
         <div className="banner banner-muted">
@@ -562,11 +506,109 @@ export function App(): JSX.Element {
 
       {mainView === 'list' ? (
         <div className="list-page">
-          <div className="list-page__top" />
+          <div className="list-page__top">
+            <div className="list-page__top-bar">
+              <input
+                type="search"
+                className="list-page__search"
+                placeholder="Search"
+                aria-label="Search"
+              />
+              <label className="list-page__top-bar-label">
+                Filter
+                <select value={filter} onChange={(e) => setFilter(e.target.value as FilterMode)}>
+                  <option value="all">All</option>
+                  <option value="online">Online only</option>
+                  <option value="offline">Offline only</option>
+                </select>
+              </label>
+              <label className="list-page__top-bar-label">
+                Group by
+                <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupByMode)}>
+                  <option value="none">None</option>
+                  <option value="subnet">Subnet</option>
+                  <option value="vendor">Vendor</option>
+                  <option value="deviceType">Device type</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="secondary list-page__top-sort"
+                title="Sort the device list"
+              >
+                Sort
+              </button>
+              <button
+                type="button"
+                className="secondary list-page__top-columns"
+                title="Show or hide table columns"
+                onClick={() => {
+                  setColumnsPanelOpen((v) => !v)
+                }}
+              >
+                Columns…
+              </button>
+            </div>
+          </div>
           <div className="list-page__content">
             <div className="list-page__zones">
-              <div className="list-page__left" />
+              <div className="list-page__left">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        for (let attempt = 0; attempt < 16; attempt++) {
+                          const b = new Uint8Array(1)
+                          crypto.getRandomValues(b)
+                          const ip = `203.0.113.${2 + (b[0] % 253)}`
+                          try {
+                            const created = await api.saveDevice({
+                              name: 'New device',
+                              ip,
+                              subnet: '',
+                              gateway: ''
+                            })
+                            setFocusNameEditDeviceId(created.id)
+                            return
+                          } catch (e) {
+                            const msg = e instanceof Error ? e.message : String(e)
+                            if (msg.includes('already')) continue
+                            throw e
+                          }
+                        }
+                        throw new Error('Could not add device')
+                      } catch (e) {
+                        alert(e instanceof Error ? e.message : 'Could not add device')
+                      }
+                    })()
+                  }}
+                >
+                  Add device
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddMultipleOpen(true)
+                  }}
+                >
+                  Add Multiple…
+                </button>
+              </div>
               <div className="list-page__center">
+                <div className="toolbar list-page__work-actions">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExtraColumns((cols) => cols.concat(`Column ${cols.length + 1}`))
+                    }}
+                  >
+                    Add Column
+                  </button>
+                  <button type="button" onClick={() => void api.openMapViewWindow()}>
+                    Open Map View Window
+                  </button>
+                </div>
                 <div className="list-view-split">
                   <div className="list-view-split__table">
                     <DeviceTable

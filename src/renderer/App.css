@@ -29,20 +29,65 @@ body {
 }
 
 .list-page {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
 }
 
 .list-page__top {
   display: block;
-  height: 44px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.list-page__top-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: var(--space-2);
+  column-gap: var(--space-2);
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 38px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border-muted);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: var(--color-surface);
-  margin-bottom: var(--space-5);
+}
+
+.list-page__search {
+  width: min(100%, 240px);
+  max-width: 100%;
+  min-height: 2.125rem;
+  font-size: var(--font-size-body-sm);
+  line-height: var(--line-height-tight);
+}
+
+.list-page__top-bar-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  font-size: var(--font-size-body-sm);
+  line-height: var(--line-height-tight);
+  color: var(--color-text-label);
+}
+
+.list-page__top-sort,
+.list-page__top-columns {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-2);
+  font-size: var(--font-size-body-sm);
+  line-height: var(--line-height-tight);
 }
 
 .list-page__content {
   display: block;
+  width: 100%;
+  min-width: 0;
+  border-top: 1px solid var(--color-border-muted);
+  padding-top: var(--space-5);
+  margin-top: 0;
 }
 
 .list-page__zones {
@@ -51,22 +96,36 @@ body {
   align-items: flex-start;
 }
 
-.list-page__left,
 .list-page__right {
   display: block;
 }
 
 .list-page__left {
-  width: 220px;
-  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+  width: 200px;
+  padding: var(--space-3);
   border: 1px solid var(--color-border-muted);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: var(--color-surface);
+}
+
+.list-page__left > button {
+  padding-block: var(--space-2);
+  padding-inline: var(--space-3);
+  font-size: var(--font-size-body-sm);
+  line-height: var(--line-height-tight);
 }
 
 .list-page__center {
   flex: 1;
   min-width: 0;
+}
+
+.list-page__work-actions {
+  margin-bottom: var(--space-4);
 }
 
 .list-page__right {
