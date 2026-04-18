@@ -28,6 +28,11 @@ body {
   margin: 0;
 }
 
+.app--network-view {
+  max-width: none;
+  margin: 0;
+}
+
 .list-page {
   display: flex;
   flex-direction: column;

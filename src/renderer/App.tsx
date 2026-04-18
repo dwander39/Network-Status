@@ -19,7 +19,7 @@ import { DeviceTable, type GroupByMode, type SortKey } from './components/Device
 import { DiscoveredPanel } from './components/DiscoveredPanel'
 import { SettingsModal } from './components/SettingsModal'
 import { NewNetworkDetectedModal } from './components/NewNetworkDetectedModal'
-import { EventLogPanel } from './components/EventLogPanel'
+import { NetworkSurface } from './components/NetworkSurface'
 
 const MapView = lazy(async () => {
   const m = await import('./components/MapView')
@@ -27,7 +27,13 @@ const MapView = lazy(async () => {
 })
 
 type FilterMode = 'all' | 'online' | 'offline'
-type MainViewMode = 'list' | 'map'
+type MainViewMode = 'list' | 'map' | 'network'
+
+function initialMainViewFromLocation(): MainViewMode {
+  if (typeof window === 'undefined') return 'list'
+  if (window.location.hash === '#network') return 'network'
+  return 'list'
+}
 
 function sortDevices(
   list: Device[],
@@ -81,7 +87,7 @@ export function App(): JSX.Element {
   /** Which saved network the user is currently viewing in the dropdown. */
   const [viewingProfile, setViewingProfile] = useState<NetworkProfileListItem | null>(null)
   const [newNetwork, setNewNetwork] = useState<import('@shared/types').NewNetworkDetectedPayload | null>(null)
-  const [mainView, setMainView] = useState<MainViewMode>('list')
+  const [mainView, setMainView] = useState<MainViewMode>(initialMainViewFromLocation)
   const [focusNameEditDeviceId, setFocusNameEditDeviceId] = useState<string | null>(null)
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
   const [addMultipleOpen, setAddMultipleOpen] = useState(false)
@@ -179,6 +185,29 @@ export function App(): JSX.Element {
     viewingProfileRef.current = viewingProfile
   }, [viewingProfile])
 
+  useEffect(() => {
+    if (isMapWindow) return
+    const onHashChange = (): void => {
+      if (window.location.hash === '#network') {
+        setMainView('network')
+      } else {
+        setMainView((m) => (m === 'network' ? 'list' : m))
+      }
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [isMapWindow])
+
+  useEffect(() => {
+    if (isMapWindow) return
+    const base = `${window.location.pathname}${window.location.search}`
+    if (mainView === 'network' && window.location.hash !== '#network') {
+      window.history.replaceState(null, '', `${base}#network`)
+    } else if (mainView !== 'network' && window.location.hash === '#network') {
+      window.history.replaceState(null, '', base || window.location.pathname)
+    }
+  }, [mainView, isMapWindow])
+
   // When the user changes the "Saved networks" dropdown, reload devices for that saved network.
   useEffect(() => {
     if (!window.ssApi) return
@@ -270,10 +299,8 @@ export function App(): JSX.Element {
     <div
       className={`app${mainView === 'map' ? ' app--map-view' : ''}${
         mainView === 'list' ? ' app--list-view' : ''
-      }`}
+      }${mainView === 'network' ? ' app--network-view' : ''}`}
     >
-      <h1>Network devices</h1>
-
       <nav className="settings-submenu view-mode-nav" aria-label="Main view">
         <button
           type="button"
@@ -300,32 +327,48 @@ export function App(): JSX.Element {
         >
           Map view
         </button>
+        <button
+          type="button"
+          className={
+            mainView === 'network'
+              ? 'settings-submenu__tab settings-submenu__tab--active'
+              : 'settings-submenu__tab'
+          }
+          aria-current={mainView === 'network' ? 'page' : undefined}
+          onClick={() => setMainView('network')}
+        >
+          Network
+        </button>
       </nav>
 
-      {networkInfo ? (
-        <div
-          className={`banner banner-muted${networkInfo.profileName ? ' banner-current-profile' : ''}`}
-        >
-          <span className="network-profile-title">
-            {networkInfo.profileName ? (
-              <>
-                <strong>{networkInfo.profileName}</strong>
-                <span className="muted"> — current network</span>
-              </>
-            ) : (
-              <strong>Current network</strong>
-            )}
-          </span>
-          <div className="network-profile-banner-detail">
-            {networkInfo.cidr} — gateway {networkInfo.gateway}, this host {networkInfo.localIpv4}
-            {networkInfo.profileLastSeen ? (
-              <span className="muted"> — last seen {new Date(networkInfo.profileLastSeen).toLocaleString()}</span>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-      {networkSwitchMessage ? (
-        <div className="banner banner-warn">{networkSwitchMessage}</div>
+      {mainView !== 'list' ? (
+        <>
+          {networkInfo ? (
+            <div
+              className={`banner banner-muted${networkInfo.profileName ? ' banner-current-profile' : ''}`}
+            >
+              <span className="network-profile-title">
+                {networkInfo.profileName ? (
+                  <>
+                    <strong>{networkInfo.profileName}</strong>
+                    <span className="muted"> — current network</span>
+                  </>
+                ) : (
+                  <strong>Current network</strong>
+                )}
+              </span>
+              <div className="network-profile-banner-detail">
+                {networkInfo.cidr} — gateway {networkInfo.gateway}, this host {networkInfo.localIpv4}
+                {networkInfo.profileLastSeen ? (
+                  <span className="muted"> — last seen {new Date(networkInfo.profileLastSeen).toLocaleString()}</span>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          {networkSwitchMessage ? (
+            <div className="banner banner-warn">{networkSwitchMessage}</div>
+          ) : null}
+        </>
       ) : null}
 
       {mainView === 'map' ? (
@@ -496,12 +539,14 @@ export function App(): JSX.Element {
         </div>
       ) : null}
 
-      <NetworkProfilePanel
-        networkInfo={networkInfo}
-        profiles={profiles}
-        onProfilesUpdated={onProfilesUpdated}
-        onViewingProfileChange={setViewingProfile}
-      />
+      {mainView !== 'list' ? (
+        <NetworkProfilePanel
+          networkInfo={networkInfo}
+          profiles={profiles}
+          onProfilesUpdated={onProfilesUpdated}
+          onViewingProfileChange={setViewingProfile}
+        />
+      ) : null}
 
       {mainView === 'list' ? (
         <div className="list-page">
@@ -808,7 +853,7 @@ export function App(): JSX.Element {
             </div>
           </div>
         </div>
-      ) : (
+      ) : mainView === 'map' ? (
         <Suspense fallback={<p className="muted">Loading map…</p>}>
           <MapView
             devices={filtered}
@@ -819,38 +864,69 @@ export function App(): JSX.Element {
             }}
           />
         </Suspense>
+      ) : (
+        <NetworkSurface
+          entries={discovered}
+          savedIps={savedIps}
+          onRefresh={async () => {
+            setDiscovered([])
+            try {
+              const p = await api.refreshArp()
+              setDiscovered(p.discovered)
+            } catch {
+              const arp = await api.getArp()
+              setDiscovered(arp.discovered)
+            }
+          }}
+          onAddToList={(e) => {
+            const name = e.vendor?.trim()
+              ? `${e.vendor.trim()} (${e.ip})`
+              : `Device ${e.ip}`
+            setFormPrefill({ name, ip: e.ip, subnet: '', gateway: '' })
+            setFormModalKey((k) => k + 1)
+            setFormDevice('new')
+          }}
+          onDismiss={async (e) => {
+            await api.dismissDiscoveredIp(e.ip)
+          }}
+          onClearDismissed={async () => {
+            await api.clearDismissedDiscovered()
+          }}
+          activeNetworkId={networkInfo?.networkId ?? null}
+          profiles={profiles}
+        />
       )}
 
-      <DiscoveredPanel
-        entries={discovered}
-        savedIps={savedIps}
-        onRefresh={async () => {
-          setDiscovered([])
-          try {
-            const p = await api.refreshArp()
-            setDiscovered(p.discovered)
-          } catch {
-            const arp = await api.getArp()
-            setDiscovered(arp.discovered)
-          }
-        }}
-        onAddToList={(e) => {
-          const name = e.vendor?.trim()
-            ? `${e.vendor.trim()} (${e.ip})`
-            : `Device ${e.ip}`
-          setFormPrefill({ name, ip: e.ip, subnet: '', gateway: '' })
-          setFormModalKey((k) => k + 1)
-          setFormDevice('new')
-        }}
-        onDismiss={async (e) => {
-          await api.dismissDiscoveredIp(e.ip)
-        }}
-        onClearDismissed={async () => {
-          await api.clearDismissedDiscovered()
-        }}
-      />
-
-      <EventLogPanel activeNetworkId={networkInfo?.networkId ?? null} profiles={profiles} />
+      {mainView === 'map' ? (
+        <DiscoveredPanel
+          entries={discovered}
+          savedIps={savedIps}
+          onRefresh={async () => {
+            setDiscovered([])
+            try {
+              const p = await api.refreshArp()
+              setDiscovered(p.discovered)
+            } catch {
+              const arp = await api.getArp()
+              setDiscovered(arp.discovered)
+            }
+          }}
+          onAddToList={(e) => {
+            const name = e.vendor?.trim()
+              ? `${e.vendor.trim()} (${e.ip})`
+              : `Device ${e.ip}`
+            setFormPrefill({ name, ip: e.ip, subnet: '', gateway: '' })
+            setFormModalKey((k) => k + 1)
+            setFormDevice('new')
+          }}
+          onDismiss={async (e) => {
+            await api.dismissDiscoveredIp(e.ip)
+          }}
+          onClearDismissed={async () => {
+            await api.clearDismissedDiscovered()
+          }}
+        />
+      ) : null}
 
       {formDevice !== null ? (
         <DeviceForm
