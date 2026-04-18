@@ -25,8 +25,10 @@ import type {
   SaveAlertRulePayload,
   SaveDeviceGroupPayload,
   SaveDevicePayload,
+  MapLayoutInvalidatedPayload,
   MapLayoutSavePayload,
-  MapManualGroupLayoutActionPayload
+  MapManualGroupLayoutActionPayload,
+  SelectedEquipmentIdsChangedPayload
 } from '@shared/types'
 
 export interface ArpPayload {
@@ -114,6 +116,8 @@ const api = {
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke(IPC.GET_SETTINGS),
   saveSettings: (partial: Partial<AppSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke(IPC.SAVE_SETTINGS, partial),
+  getSelectedEquipmentIds: (): Promise<string[]> => ipcRenderer.invoke(IPC.GET_SELECTED_EQUIPMENT_IDS),
+  setSelectedEquipmentIds: (ids: string[]): Promise<void> => ipcRenderer.invoke(IPC.SET_SELECTED_EQUIPMENT_IDS, ids),
   onDevicesChanged: (cb: (devices: Device[]) => void): (() => void) => {
     const handler = (_e: import('electron').IpcRendererEvent, devices: Device[]): void => {
       cb(devices)
@@ -153,6 +157,20 @@ const api = {
     }
     ipcRenderer.on(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, handler)
     return () => ipcRenderer.removeListener(IPC.ON_MAP_MANUAL_GROUP_LAYOUT_ACTION, handler)
+  },
+  onMapLayoutInvalidated: (cb: (p: MapLayoutInvalidatedPayload) => void): (() => void) => {
+    const handler = (_e: import('electron').IpcRendererEvent, payload: MapLayoutInvalidatedPayload): void => {
+      cb(payload)
+    }
+    ipcRenderer.on(IPC.ON_MAP_LAYOUT_INVALIDATED, handler)
+    return () => ipcRenderer.removeListener(IPC.ON_MAP_LAYOUT_INVALIDATED, handler)
+  },
+  onSelectedEquipmentIdsChanged: (cb: (p: SelectedEquipmentIdsChangedPayload) => void): (() => void) => {
+    const handler = (_e: import('electron').IpcRendererEvent, payload: SelectedEquipmentIdsChangedPayload): void => {
+      cb(payload)
+    }
+    ipcRenderer.on(IPC.ON_SELECTED_EQUIPMENT_IDS_CHANGED, handler)
+    return () => ipcRenderer.removeListener(IPC.ON_SELECTED_EQUIPMENT_IDS_CHANGED, handler)
   },
   onDeviceGroupsChanged: (cb: (groups: DeviceGroup[]) => void): (() => void) => {
     const handler = (_e: import('electron').IpcRendererEvent, groups: DeviceGroup[]): void => {

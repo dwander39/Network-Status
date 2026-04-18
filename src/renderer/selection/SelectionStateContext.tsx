@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -31,20 +32,53 @@ export function useSelectionState(): SelectionState {
 }
 
 export function SelectionStateProvider({ children }: { children: ReactNode }): JSX.Element {
+  const api = window.ssApi
   const [selectedEquipmentIds, setSelectedEquipmentIdsState] = useState<Set<string>>(() => new Set())
   const selectedEquipmentIdsRef = useRef(selectedEquipmentIds)
   selectedEquipmentIdsRef.current = selectedEquipmentIds
+  const lastEmittedSigRef = useRef<string>('')
+
+  const sigOf = useCallback((ids: Iterable<string>) => [...ids].sort().join(','), [])
+
+  useEffect(() => {
+    let cancelled = false
+    void api.getSelectedEquipmentIds().then((ids) => {
+      if (cancelled) return
+      const next = new Set(ids)
+      lastEmittedSigRef.current = sigOf(next)
+      setSelectedEquipmentIdsState(next)
+    })
+    const unsub = api.onSelectedEquipmentIdsChanged((p) => {
+      const next = new Set(p.selectedEquipmentIds)
+      const sig = sigOf(next)
+      if (sig === sigOf(selectedEquipmentIdsRef.current)) return
+      lastEmittedSigRef.current = sig
+      setSelectedEquipmentIdsState(next)
+    })
+    return () => {
+      cancelled = true
+      unsub()
+    }
+  }, [api, sigOf])
 
   const setSelectedEquipmentIds = useCallback(
     (ids: ReadonlySet<string> | Set<string> | readonly string[] | string[]) => {
-      setSelectedEquipmentIdsState(ids instanceof Set ? new Set(ids) : new Set(ids))
+      const next = ids instanceof Set ? new Set(ids) : new Set(ids)
+      const sig = sigOf(next)
+      if (sig === sigOf(selectedEquipmentIdsRef.current)) return
+      setSelectedEquipmentIdsState(next)
+      // Push authoritative update to main (broadcasts to other windows).
+      if (sig !== lastEmittedSigRef.current) {
+        lastEmittedSigRef.current = sig
+        void api.setSelectedEquipmentIds([...next])
+      }
     },
-    []
+    [api, sigOf]
   )
 
   const clearSelectedEquipmentIds = useCallback(() => {
-    setSelectedEquipmentIdsState(new Set())
-  }, [])
+    setSelectedEquipmentIds(new Set())
+  }, [setSelectedEquipmentIds])
 
   const getSelectedEquipmentIds = useCallback(() => new Set(selectedEquipmentIdsRef.current), [])
 

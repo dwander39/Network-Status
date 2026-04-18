@@ -48,6 +48,8 @@ export const IPC = {
   SHOW_MAP_NODE_CONTEXT_MENU: 'mapLayout:showNodeContextMenu',
   ON_MAP_MANUAL_GROUP_LOCK_CHANGED: 'mapLayout:manualGroupLockChanged',
   ON_MAP_MANUAL_GROUP_LAYOUT_ACTION: 'mapLayout:manualGroupLayoutAction',
+  /** Main → all map surfaces: persisted layout for `networkId` changed; re-fetch via GET_MAP_LAYOUT. */
+  ON_MAP_LAYOUT_INVALIDATED: 'mapLayout:invalidated',
   GET_EVENT_LOGS: 'eventLogs:get',
   ON_EVENT_LOG_ADDED: 'eventLogs:added',
   CLEAR_EVENT_LOGS: 'eventLogs:clear',
@@ -62,5 +64,10 @@ export const IPC = {
   /** UI: open one secondary native window (hardcoded placeholder). */
   OPEN_MAP_VIEW_WINDOW: 'ui:openMapViewWindow',
   /** UI: focus the existing Map pop-out window if open (Map-surface ownership). */
-  FOCUS_MAP_VIEW_WINDOW_IF_OPEN: 'ui:focusMapViewWindowIfOpen'
+  FOCUS_MAP_VIEW_WINDOW_IF_OPEN: 'ui:focusMapViewWindowIfOpen',
+
+  /** Cross-window selection sync (authoritative in main process memory; v1 equipment ids only). */
+  GET_SELECTED_EQUIPMENT_IDS: 'selection:getSelectedEquipmentIds',
+  SET_SELECTED_EQUIPMENT_IDS: 'selection:setSelectedEquipmentIds',
+  ON_SELECTED_EQUIPMENT_IDS_CHANGED: 'selection:selectedEquipmentIdsChanged'
 } as const

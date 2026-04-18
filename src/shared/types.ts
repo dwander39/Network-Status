@@ -381,6 +381,16 @@ export interface MapManualGroupLayoutActionPayload {
   groupId: string
 }
 
+/** Main → renderer: SQLite map layout for this network was mutated; reload with getMapLayout. */
+export interface MapLayoutInvalidatedPayload {
+  networkId: string
+}
+
+/** Main → renderer: cross-window shared selection changed (equipment ids only). */
+export interface SelectedEquipmentIdsChangedPayload {
+  selectedEquipmentIds: string[]
+}
+
 export type MapNodeContextMenuTarget =
   | { kind: 'manualGroup'; id: string; contentsLocked: boolean }
   | { kind: 'device'; id: string }

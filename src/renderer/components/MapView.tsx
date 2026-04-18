@@ -227,26 +227,8 @@ function collectPersistPayload(nodes: Node[], networkId: string): MapLayoutSaveP
   return { networkId, positions, manualGroupLayouts }
 }
 
-/** Keeps React `savedBundle` aligned with the live graph after drags (before debounced DB write). */
-function mergeDeviceGatewayPositionsIntoBundle(bundle: MapLayoutBundle, nodes: Node[]): MapLayoutBundle {
-  const byId = new Map(nodes.map((n) => [n.id, n]))
-  const positions = { ...bundle.positions }
-  for (const n of nodes) {
-    if (n.type !== 'device' && n.id !== MAP_GATEWAY_NODE_ID) continue
-    const abs = absoluteNodePosition(n, byId)
-    const parent = n.parentId ? byId.get(n.parentId) : undefined
-    const manualGroupId = parent?.type === 'manualGroup' ? parent.id : null
-    if (n.type === 'device') {
-      const dd = n.data as DeviceNodeData
-      const entry: (typeof positions)[string] = { x: abs.x, y: abs.y, manualGroupId }
-      if (dd.mapManualLayout && dd.mapDeviceCollapsed) entry.mapDeviceCollapsed = true
-      positions[n.id] = entry
-    } else {
-      positions[n.id] = { x: abs.x, y: abs.y, manualGroupId }
-    }
-  }
-  return { ...bundle, positions }
-}
+// Note: `savedBundle` is treated as a view cache of the SQLite authoritative layout (GET_MAP_LAYOUT).
+// Live interaction state stays in React Flow `nodes`; persisted truth comes from `getMapLayout` + invalidation.
 
 interface GroupHandlers {
   commitRename: (id: string, name: string) => void
@@ -522,6 +504,9 @@ function MapCanvas({
   )
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const [savedBundle, setSavedBundle] = useState<MapLayoutBundle>({ manualGroups: [], positions: {} })
+  /** Bumped when an authoritative bundle is fetched (load/invalidation). Forces rebuild from bundle. */
+  const [bundleReloadTick, setBundleReloadTick] = useState(0)
+  const prevBundleReloadTickRef = useRef(0)
   const [layoutMode, setLayoutMode] = useState<MapLayoutMode>('manual')
   /**
    * Bumped only when the map graph is fully replaced via `buildMapNodes` / `buildAutoLayoutNodes` (bundle,
@@ -712,6 +697,25 @@ function MapCanvas({
   const dragStartRef = useRef<DragStartSnap | null>(null)
   const schedulePersistRef = useRef<() => void>(() => {})
 
+  /**
+   * Renderer-side normalization to match main's `normalizeNetworkId`:
+   * - trims + removes whitespace
+   * - splits on `|` and drops empty parts
+   * - collapses legacy `ssid|gateway|cidr` → canonical `gateway|cidr`
+   */
+  const normalizedNetworkId = useMemo(() => {
+    const cleaned = String(networkId ?? '')
+      .trim()
+      .replace(/\s+/g, '')
+    if (!cleaned) return ''
+    const parts = cleaned.split('|').filter(Boolean)
+    if (parts.length >= 3) {
+      const [_ssid, gw, ...rest] = parts
+      return [gw, rest.join('|')].join('|')
+    }
+    return parts.join('|')
+  }, [networkId])
+
   useEffect(() => {
     let cancelled = false
     const nid = networkId?.trim() ?? ''
@@ -722,11 +726,25 @@ function MapCanvas({
     void api.getMapLayout(nid).then((bundle) => {
       if (cancelled) return
       setSavedBundle(bundle)
+      setBundleReloadTick((t) => t + 1)
     })
     return () => {
       cancelled = true
     }
   }, [api, networkId])
+
+  /** Peer window (or same) saved layout to SQLite — reload authoritative bundle (existing `savedBundle` → nodes path). */
+  useEffect(() => {
+    return api.onMapLayoutInvalidated((p) => {
+      const nid = networkId?.trim() ?? ''
+      if (!nid) return
+      if (!normalizedNetworkId || p.networkId !== normalizedNetworkId) return
+      void api.getMapLayout(nid).then((bundle) => {
+        setSavedBundle(bundle)
+        setBundleReloadTick((t) => t + 1)
+      })
+    })
+  }, [api, networkId, normalizedNetworkId])
 
   useEffect(() => {
     return api.onMapManualGroupLockChanged((p) => {
@@ -743,13 +761,8 @@ function MapCanvas({
     if (!nid) return
     const payload = collectPersistPayload(getNodes(), nid)
     await api.saveMapLayout(payload)
-    try {
-      const b = await api.getMapLayout(nid)
-      setSavedBundle(b)
-    } catch {
-      /* keep prior bundle if refresh fails */
-    }
-  }, [api, getNodes, layoutMode, networkId, setSavedBundle])
+    // Authoritative refresh enters via GET_MAP_LAYOUT (initial load) + ON_MAP_LAYOUT_INVALIDATED.
+  }, [api, getNodes, layoutMode, networkId])
 
   /** Immediate full layout write + bundle refresh (undo restore delete / group re-create). */
   const persistLayoutSnapshot = useCallback(
@@ -757,8 +770,6 @@ function MapCanvas({
       const nid = networkId?.trim()
       if (!nid || layoutModeRef.current !== 'manual') return
       await api.saveMapLayout(collectPersistPayload(nds, nid))
-      const b = await api.getMapLayout(nid)
-      setSavedBundle(b)
     },
     [api, networkId]
   )
@@ -825,10 +836,9 @@ function MapCanvas({
         }
       })
       setNodesState(next)
-      setSavedBundle((bundle) => mergeDeviceGatewayPositionsIntoBundle(bundle, next))
       void persistLayoutSnapshot(next)
     },
-    [getNodes, networkId, persistLayoutSnapshot, setNodesState, setSavedBundle]
+    [getNodes, networkId, persistLayoutSnapshot, setNodesState]
   )
 
   const handleManualGroupAutoAlign = useCallback(
@@ -863,10 +873,9 @@ function MapCanvas({
         }
       })
       setNodesState(next)
-      setSavedBundle((bundle) => mergeDeviceGatewayPositionsIntoBundle(bundle, next))
       void persistLayoutSnapshot(next)
     },
-    [getNodes, networkId, persistLayoutSnapshot, setNodesState, setSavedBundle]
+    [getNodes, networkId, persistLayoutSnapshot, setNodesState]
   )
 
   const handleManualGroupSetLock = useCallback(
@@ -935,20 +944,14 @@ function MapCanvas({
       if (oldName === trimmed) return
       void (async () => {
         await api.renameMapManualGroup({ id, name: trimmed })
-        const b = await api.getMapLayout(nid)
-        setSavedBundle(b)
         if (!canRecordHistoryRef.current) return
         pushMapHistory({
           type: 'renameManualGroup',
           undo: async () => {
             await api.renameMapManualGroup({ id, name: oldName || 'Group' })
-            const b2 = await api.getMapLayout(nid)
-            setSavedBundle(b2)
           },
           redo: async () => {
             await api.renameMapManualGroup({ id, name: trimmed })
-            const b2 = await api.getMapLayout(nid)
-            setSavedBundle(b2)
           }
         })
       })()
@@ -993,8 +996,6 @@ function MapCanvas({
       await persistNow()
       logDeleteFlowPreDelete('map:deleteManualGroup')
       await api.deleteMapManualGroup(groupId)
-      const b = await api.getMapLayout(nid)
-      setSavedBundle(b)
       recoverKeyboardAfterDestructiveAction('map:deleteManualGroup', {
         clearGraphSelection: () => {
           setInspectorPeekDeviceId(null)
@@ -1033,8 +1034,6 @@ function MapCanvas({
             const rid = redoState.restoredId
             if (!rid) return
             await api.deleteMapManualGroup(rid)
-            const b2 = await api.getMapLayout(nid)
-            setSavedBundle(b2)
           }
         })
       }
@@ -1065,14 +1064,12 @@ function MapCanvas({
       void (async () => {
         try {
           await api.saveMapLayout(payload)
-          const b = await api.getMapLayout(nid)
-          setSavedBundle(b)
         } catch {
           /* ignore */
         }
       })()
     }, 400)
-  }, [api, getNodes, layoutMode, networkId, setSavedBundle])
+  }, [api, getNodes, layoutMode, networkId])
 
   schedulePersistRef.current = schedulePersist
 
@@ -1206,7 +1203,6 @@ function MapCanvas({
           data: { ...dd, mapDeviceCollapsed: !dd.mapDeviceCollapsed }
         }
       })
-      setSavedBundle((b) => mergeDeviceGatewayPositionsIntoBundle(b, next))
       queueMicrotask(() => schedulePersistRef.current())
       return next
     })
@@ -1220,7 +1216,6 @@ function MapCanvas({
         if (!dd.mapManualLayout) return n
         return { ...n, data: { ...dd, mapDeviceCollapsed: true } }
       })
-      setSavedBundle((b) => mergeDeviceGatewayPositionsIntoBundle(b, next))
       queueMicrotask(() => schedulePersistRef.current())
       return next
     })
@@ -1234,7 +1229,6 @@ function MapCanvas({
         if (!dd.mapManualLayout) return n
         return { ...n, data: { ...dd, mapDeviceCollapsed: false } }
       })
-      setSavedBundle((b) => mergeDeviceGatewayPositionsIntoBundle(b, next))
       queueMicrotask(() => schedulePersistRef.current())
       return next
     })
@@ -1267,7 +1261,7 @@ function MapCanvas({
       prevLayoutModeRef.current = layoutMode
       return
     }
-    const reseedFromSaved = prevMode !== 'manual'
+    const reseedFromSaved = prevMode !== 'manual' || prevBundleReloadTickRef.current !== bundleReloadTick
     setNodesState((prev) =>
       buildMapNodes(
         reseedFromSaved ? [] : prev,
@@ -1281,7 +1275,8 @@ function MapCanvas({
     setMapGraphRebuildTick((t) => t + 1)
     setEdges(buildEdges(devices))
     prevLayoutModeRef.current = layoutMode
-  }, [devices, layoutMode, savedBundle, networkInfo?.gateway, setEdges, setNodesState])
+    prevBundleReloadTickRef.current = bundleReloadTick
+  }, [bundleReloadTick, devices, layoutMode, savedBundle, networkInfo?.gateway, setEdges, setNodesState])
 
   useEffect(() => {
     if (layoutMode === 'manual') return
@@ -1439,7 +1434,6 @@ function MapCanvas({
           : nds
 
       setNodesState(next)
-      setSavedBundle((bundle) => mergeDeviceGatewayPositionsIntoBundle(bundle, next))
 
       const finalNode = next.find((n) => n.id === node.id)
       if (!snap || !finalNode || !canRecordHistoryRef.current) {
@@ -1755,7 +1749,6 @@ function MapCanvas({
       width: DEFAULT_NEW_GROUP_W,
       height: DEFAULT_NEW_GROUP_H
     })
-    setSavedBundle((b) => ({ ...b, manualGroups: [...b.manualGroups, g] }))
     if (canRecordHistoryRef.current) {
       const gid = g.id
       const snap = {
@@ -1769,8 +1762,6 @@ function MapCanvas({
         type: 'createManualGroup',
         undo: async () => {
           await api.deleteMapManualGroup(gid)
-          const b2 = await api.getMapLayout(nid)
-          setSavedBundle(b2)
         },
         redo: async () => {
           await api.createMapManualGroup({
@@ -1781,8 +1772,6 @@ function MapCanvas({
             width: snap.width,
             height: snap.height
           })
-          const b2 = await api.getMapLayout(nid)
-          setSavedBundle(b2)
         }
       })
     }

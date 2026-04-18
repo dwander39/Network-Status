@@ -67,6 +67,7 @@ import {
   createManualGroup,
   deleteManualGroup,
   deleteMapLayoutForNetwork,
+  getManualGroup,
   getMapLayoutBundle,
   renameManualGroup,
   setManualGroupContentsLocked,
@@ -115,6 +116,9 @@ let eventLogs: EventLogService | null = null
 let isMapWindowOpen = false
 let mapWindow: BrowserWindow | null = null
 
+// Cross-window selection authority (in-memory; v1 equipment ids only).
+let selectedEquipmentIds: string[] = []
+
 /**
  * Use the latest sampled context for UI filtering (fast), falling back to debounced stable id.
  * This prevents lists from getting "stuck" on the previous LAN during Wi‑Fi switches.
@@ -158,6 +162,29 @@ function pushNetworkInfoUpdated(): void {
   }
   if (mapWindow && !mapWindow.isDestroyed()) {
     mapWindow.webContents.send(IPC.ON_NETWORK_INFO_UPDATED, payload)
+  }
+}
+
+/** After any persisted map layout mutation; map surfaces re-fetch from SQLite (no cross-renderer state mirroring). */
+function pushMapLayoutInvalidated(rawNetworkId: string): void {
+  const nid = normalizeNetworkId(rawNetworkId)
+  if (!nid) return
+  const payload = { networkId: nid }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.ON_MAP_LAYOUT_INVALIDATED, payload)
+  }
+  if (mapWindow && !mapWindow.isDestroyed()) {
+    mapWindow.webContents.send(IPC.ON_MAP_LAYOUT_INVALIDATED, payload)
+  }
+}
+
+function pushSelectedEquipmentIdsChanged(): void {
+  const payload = { selectedEquipmentIds }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.ON_SELECTED_EQUIPMENT_IDS_CHANGED, payload)
+  }
+  if (mapWindow && !mapWindow.isDestroyed()) {
+    mapWindow.webContents.send(IPC.ON_SELECTED_EQUIPMENT_IDS_CHANGED, payload)
   }
 }
 
@@ -322,6 +349,18 @@ function pushDeviceGroupsToRenderer(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle(IPC.GET_SELECTED_EQUIPMENT_IDS, () => selectedEquipmentIds)
+
+  ipcMain.handle(IPC.SET_SELECTED_EQUIPMENT_IDS, (_e, ids: unknown) => {
+    const next = Array.isArray(ids) ? ids.map((x) => String(x)) : []
+    // Keep stable ordering for simple equality checks in renderers.
+    next.sort()
+    const prev = selectedEquipmentIds
+    if (prev.length === next.length && prev.every((v, i) => v === next[i])) return
+    selectedEquipmentIds = next
+    pushSelectedEquipmentIdsChanged()
+  })
+
   ipcMain.handle(IPC.OPEN_MAP_VIEW_WINDOW, async () => {
     if (mapWindow && mapWindow.isDestroyed()) {
       mapWindow = null
@@ -350,6 +389,10 @@ function registerIpc(): void {
       w.on('closed', () => {
         mapWindow = null
         isMapWindowOpen = false
+      })
+      // Ensure new surface starts with current shared selection.
+      w.webContents.once('did-finish-load', () => {
+        pushSelectedEquipmentIdsChanged()
       })
 
       const url = devRendererUrl()
@@ -425,6 +468,7 @@ function registerIpc(): void {
     await deleteDevicesForNetwork(db, networkId, { source: 'user' })
     deleteArpEntriesForNetwork(db, networkId)
     deleteMapLayoutForNetwork(db, networkId)
+    pushMapLayoutInvalidated(networkId)
     db.prepare(`DELETE FROM alert_rules WHERE network_id = ?`).run(networkId)
     pushNetworkProfilesToRenderer()
     pushNetworkInfoUpdated()
@@ -658,20 +702,29 @@ function registerIpc(): void {
     if (payload.manualGroupLayouts?.length) {
       upsertManualGroupLayouts(db, nid, payload.manualGroupLayouts)
     }
+    pushMapLayoutInvalidated(nid)
   })
 
   ipcMain.handle(IPC.CREATE_MAP_MANUAL_GROUP, (_e, payload: CreateMapManualGroupPayload) => {
     const nid = normalizeNetworkId(payload.networkId)
     if (!nid) throw new Error('Invalid network')
-    return createManualGroup(getDatabase(), { ...payload, networkId: nid })
+    const row = createManualGroup(getDatabase(), { ...payload, networkId: nid })
+    pushMapLayoutInvalidated(nid)
+    return row
   })
 
   ipcMain.handle(IPC.RENAME_MAP_MANUAL_GROUP, (_e, payload: RenameMapManualGroupPayload) => {
-    renameManualGroup(getDatabase(), payload)
+    const db = getDatabase()
+    const g = getManualGroup(db, payload.id)
+    renameManualGroup(db, payload)
+    if (g?.networkId) pushMapLayoutInvalidated(g.networkId)
   })
 
   ipcMain.handle(IPC.DELETE_MAP_MANUAL_GROUP, (_e, id: string) => {
-    deleteManualGroup(getDatabase(), String(id))
+    const db = getDatabase()
+    const g = getManualGroup(db, String(id))
+    deleteManualGroup(db, String(id))
+    if (g?.networkId) pushMapLayoutInvalidated(g.networkId)
   })
 
   ipcMain.handle(IPC.SET_MAP_MANUAL_GROUP_LOCK, (_e, payload: SetMapManualGroupLockPayload) => {
@@ -752,6 +805,7 @@ function registerIpc(): void {
     const nid = normalizeNetworkId(networkId)
     if (!nid) return
     deleteMapLayoutForNetwork(getDatabase(), nid)
+    pushMapLayoutInvalidated(nid)
   })
 
   ipcMain.handle(IPC.GET_DEVICES, (_e, requestedNetworkId?: string | null) => {
