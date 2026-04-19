@@ -16,10 +16,11 @@ function distancePointToRect(px: number, py: number, r: DOMRect): number {
 export type TraceSnapHoverTarget = { deviceId: string; snapPointId: string }
 
 /**
- * Nearest visible snap handle within `maxDistPx` that matches the active trace phase and type
+ * Nearest visible snap handle within `maxDistPx` that matches the active trace family and phase
  * (via canonical snap identity), searching under `rootEl`.
  *
- * @param traceSourceDeviceId `null` = before source selection; otherwise destination phase (excludes that device).
+ * @param traceSourceDeviceId `null` = start phase (any eligible snap for the active trace family); otherwise
+ * destination phase (eligible snap ids exclude the start device).
  */
 export function pickTraceSnapHoverTarget(
   clientX: number,
@@ -30,10 +31,10 @@ export function pickTraceSnapHoverTarget(
   maxDistPx: number = MAP_TRACE_SNAP_HOVER_MAX_DIST_PX
 ): TraceSnapHoverTarget | null {
   const inferred = snapPointIdsForTraceConnection(traceType)
-  const targetSnapId =
-    traceSourceDeviceId != null ? inferred.destinationSnapPointId : inferred.sourceSnapPointId
-  const wantMeta = getSnapIdentity(targetSnapId)
-  if (!wantMeta || wantMeta.type !== traceType) return null
+  const eligibleSnapIds =
+    traceSourceDeviceId != null
+      ? new Set<string>([inferred.destinationSnapPointId])
+      : new Set<string>([inferred.sourceSnapPointId, inferred.destinationSnapPointId])
 
   const nodes = rootEl.querySelectorAll('.map-device-node__snap-point[data-device-id][data-snap-point-id]')
   type BestCandidate = { deviceId: string; snapPointId: string; dist: number }
@@ -43,7 +44,7 @@ export function pickTraceSnapHoverTarget(
     const deviceId = node.dataset.deviceId
     const snapPointId = node.dataset.snapPointId
     if (!deviceId || !snapPointId) continue
-    if (snapPointId !== targetSnapId) continue
+    if (!eligibleSnapIds.has(snapPointId)) continue
     if (traceSourceDeviceId != null && deviceId === traceSourceDeviceId) continue
     const meta = getSnapIdentity(snapPointId)
     if (!meta || meta.type !== traceType) continue

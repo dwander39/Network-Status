@@ -1717,6 +1717,61 @@ tr:last-child td {
     0 0 18px var(--map-trace-family-network-stroke);
 }
 
+/* Step 2.3: draft-time end snap hover qualification (valid / invalid) — uses family tokens + semantic warning chrome. */
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover-valid[data-trace-family='power'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--map-trace-family-power-chrome-soft),
+    0 0 18px var(--map-trace-family-power-stroke);
+}
+
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover-valid[data-trace-family='dmx'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--map-trace-family-dmx-chrome-soft),
+    0 0 18px var(--map-trace-family-dmx-stroke);
+}
+
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover-valid[data-trace-family='network'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--map-trace-family-network-chrome-soft),
+    0 0 18px var(--map-trace-family-network-stroke);
+}
+
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover-invalid[data-trace-family='power'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--color-warning-border-soft),
+    0 0 18px var(--color-warning-text);
+}
+
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover-invalid[data-trace-family='dmx'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--color-warning-border-soft),
+    0 0 18px var(--color-warning-text);
+}
+
+.map-device-node__snap-point.map-device-node__snap-point--trace-hover-invalid[data-trace-family='network'] {
+  z-index: 2;
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 0 5px var(--color-warning-border-soft),
+    0 0 18px var(--color-warning-text);
+}
+
 .map-flow-toolbar {
   display: flex;
   flex-wrap: wrap;

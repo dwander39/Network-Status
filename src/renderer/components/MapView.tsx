@@ -41,13 +41,17 @@ import {
   mapPocVisualDeviceTypeLabel,
   type MapPocVisualDeviceType
 } from '@shared/mapPocVisualDeviceTypes'
-import { inferSnapIdsForManualTrace } from '@shared/mapDeviceSnapPoints'
+import { getSnapIdentity, inferSnapIdsForManualTrace } from '@shared/mapDeviceSnapPoints'
 import {
   draftTracePathOverlayRootClassName,
   persistedManualTracePolylineClassName,
   traceFamilyToCssSuffix
 } from '@shared/mapTraceFamilyVisual'
 import { pickTraceSnapHoverTarget, type TraceSnapHoverTarget } from '@shared/mapTraceSnapHoverPick'
+import {
+  pickTraceDraftEndSnapHover,
+  type TraceDraftEndSnapHover
+} from '@shared/mapTraceSnapDraftEndHoverPick'
 import { getTraceSnapAnchorFlowPosition } from '@shared/mapTraceSnapAnchorFlow'
 import type { DeviceNodeData } from './map/DeviceNode'
 import { useConfirmAction } from '../confirm/ConfirmDialogContext'
@@ -533,6 +537,9 @@ function MapMarqueeOverlay({
 }
 
 interface MapTracePathDraftOverlayProps {
+  /** Locked start anchor in flow space (snap-based). */
+  startFlow: XYPosition | null
+  /** Committed intermediate route geometry (not endpoints). */
   points: XYPosition[]
   previewFlow: XYPosition | null
   wrapEl: HTMLDivElement | null
@@ -545,6 +552,7 @@ interface MapTracePathDraftOverlayProps {
 
 /** In-progress trace polyline in flow space, drawn in screen space over the map wrapper (POC). */
 function MapTracePathDraftOverlay({
+  startFlow,
   points,
   previewFlow,
   wrapEl,
@@ -554,15 +562,18 @@ function MapTracePathDraftOverlay({
 }: MapTracePathDraftOverlayProps): JSX.Element | null {
   void viewportRev
   if (!wrapEl) return null
-  if (points.length === 0 && previewFlow == null) return null
+  if (startFlow == null && points.length === 0 && previewFlow == null) return null
   const wrap = wrapEl.getBoundingClientRect()
   const toLocal = (p: XYPosition) => {
     const s = flowToScreenPosition(p)
     return { x: s.x - wrap.left, y: s.y - wrap.top }
   }
+  const strokePts: XYPosition[] =
+    startFlow != null ? [startFlow, ...points] : points
   const polyPts =
-    points.length >= 2 ? points.map((p) => `${toLocal(p).x},${toLocal(p).y}`).join(' ') : ''
-  const last = points.length > 0 ? toLocal(points[points.length - 1]!) : null
+    strokePts.length >= 2 ? strokePts.map((p) => `${toLocal(p).x},${toLocal(p).y}`).join(' ') : ''
+  const lastFlow = points.length > 0 ? points[points.length - 1]! : startFlow
+  const last = lastFlow ? toLocal(lastFlow) : null
   const previewLocal = previewFlow ? toLocal(previewFlow) : null
   return (
     <svg
@@ -574,7 +585,7 @@ function MapTracePathDraftOverlay({
       {polyPts ? (
         <polyline className="map-trace-path-draft-overlay__poly" points={polyPts} fill="none" />
       ) : null}
-      {last && previewLocal && points.length > 0 ? (
+      {last && previewLocal ? (
         <line
           className="map-trace-path-draft-overlay__preview"
           x1={last.x}
@@ -583,6 +594,10 @@ function MapTracePathDraftOverlay({
           y2={previewLocal.y}
         />
       ) : null}
+      {startFlow ? (() => {
+        const { x, y } = toLocal(startFlow)
+        return <circle className="map-trace-path-draft-overlay__vertex" cx={x} cy={y} r={4} />
+      })() : null}
       {points.map((p, i) => {
         const { x, y } = toLocal(p)
         return <circle key={i} className="map-trace-path-draft-overlay__vertex" cx={x} cy={y} r={4} />
@@ -674,6 +689,14 @@ function MapCanvas({
   const [persistedManualTraces, setPersistedManualTraces] = useState<MapManualTrace[]>([])
   const persistedManualTracesRef = useRef(persistedManualTraces)
   persistedManualTracesRef.current = persistedManualTraces
+  /** Step 2.4: in-session traces completed via snap-end authoring (not persisted yet). */
+  const [sessionManualTraces, setSessionManualTraces] = useState<MapManualTrace[]>([])
+  const manualTracesForView = useMemo(
+    () => [...sessionManualTraces, ...persistedManualTraces],
+    [persistedManualTraces, sessionManualTraces]
+  )
+  const manualTracesForViewRef = useRef(manualTracesForView)
+  manualTracesForViewRef.current = manualTracesForView
   const [savedBundle, setSavedBundle] = useState<MapLayoutBundle>({ manualGroups: [], positions: {} })
   /** Bumped when an authoritative bundle is fetched (load/invalidation). Forces rebuild from bundle. */
   const [bundleReloadTick, setBundleReloadTick] = useState(0)
@@ -849,6 +872,22 @@ function MapCanvas({
   const [mapTraceAuthoring, setMapTraceAuthoring] = useState<{
     traceType: MapManualTraceConnectionType
   } | null>(null)
+  /**
+   * Step 2.1: snap-start draft anchoring (S1 → S2).
+   * Stores canonical endpoint identity (deviceId + snapPointId), not coordinates.
+   */
+  const [traceDraftStartEndpoint, setTraceDraftStartEndpoint] = useState<TraceSnapHoverTarget | null>(null)
+  const traceDraftStartEndpointRef = useRef<TraceSnapHoverTarget | null>(null)
+  traceDraftStartEndpointRef.current = traceDraftStartEndpoint
+  /**
+   * Step 2.2: once a snap-anchored draft exists, the first empty-canvas click enters routing (S3) by
+   * committing the first intermediate geometry point; further clicks append geometry only.
+   */
+  const [traceDraftRouting, setTraceDraftRouting] = useState(false)
+  /** Step 2.3: draft-time end snap hover qualification (valid / invalid / neutral). */
+  const [traceDraftEndSnapHover, setTraceDraftEndSnapHover] = useState<TraceDraftEndSnapHover>({ kind: 'neutral' })
+  const traceDraftEndSnapHoverRef = useRef<TraceDraftEndSnapHover>({ kind: 'neutral' })
+  traceDraftEndSnapHoverRef.current = traceDraftEndSnapHover
   /** Step 4 POC: flow-space polyline while trace mode is on — not persisted or bound to devices. */
   const [tracePathDraftPoints, setTracePathDraftPoints] = useState<XYPosition[]>([])
   const [tracePathPreviewFlow, setTracePathPreviewFlow] = useState<XYPosition | null>(null)
@@ -968,18 +1007,86 @@ function MapCanvas({
     return parts.join('|')
   }, [networkId])
 
+  /**
+   * Step 2.4: snap-end completion entry (in-memory only).
+   * Converts an anchored draft + optional intermediate geometry into a `MapManualTrace` without persistence.
+   */
+  const commitSnapDraftToSession = useCallback(
+    (args: { clientX: number; clientY: number; endDeviceId: string; endSnapPointId: string }) => {
+      const auth = mapTraceAuthoringRef.current
+      const start = traceDraftStartEndpointRef.current
+      const nid = normalizedNetworkId
+      const wrap = flowWrapRef.current
+      if (!auth || !start || !nid || !wrap) return false
+
+      const hover = traceDraftEndSnapHoverRef.current
+      const isHoverValidEnd =
+        hover.kind === 'validEnd' &&
+        hover.target.deviceId === args.endDeviceId &&
+        hover.target.snapPointId === args.endSnapPointId
+      if (!isHoverValidEnd) return false
+
+      const inferred = inferSnapIdsForManualTrace(auth.traceType)
+      if (args.endSnapPointId !== inferred.destinationSnapPointId) return false
+
+      const srcAnchor = getTraceSnapAnchorFlowPosition(wrap, screenToFlowPosition, start.deviceId, start.snapPointId)
+      const dstAnchor = getTraceSnapAnchorFlowPosition(
+        wrap,
+        screenToFlowPosition,
+        args.endDeviceId,
+        inferred.destinationSnapPointId
+      )
+      if (!srcAnchor || !dstAnchor) return false
+
+      const intermediates = tracePathDraftPointsRef.current.map((p) => ({ x: p.x, y: p.y }))
+      const path: { x: number; y: number }[] = [{ x: srcAnchor.x, y: srcAnchor.y }, ...intermediates, { x: dstAnchor.x, y: dstAnchor.y }]
+
+      const traceId = globalThis.crypto?.randomUUID?.() ?? `local-${Date.now()}-${Math.random().toString(16).slice(2)}`
+      const row: MapManualTrace = {
+        kind: 'manual',
+        traceId,
+        networkId: nid,
+        sourceDeviceId: start.deviceId,
+        destinationDeviceId: args.endDeviceId,
+        connectionType: auth.traceType,
+        sourceSnapPointId: start.snapPointId,
+        destinationSnapPointId: inferred.destinationSnapPointId,
+        path
+      }
+
+      setSessionManualTraces((prev) => {
+        const next = [row, ...prev]
+        setEdges(buildEdges(devices, [...next, ...persistedManualTracesRef.current]))
+        return next
+      })
+
+      // Return to TraceArmed (S1): clear draft + hover qualification, keep trace mode active.
+      setTraceDraftStartEndpoint(null)
+      setTraceDraftRouting(false)
+      setTraceDraftEndSnapHover({ kind: 'neutral' })
+      setTracePathDraftPoints([])
+      setTracePathPreviewFlow(null)
+      setTraceSnapHover(null)
+      setTracePathViewportTick((t) => t + 1)
+      return true
+    },
+    [devices, normalizedNetworkId, screenToFlowPosition]
+  )
+
   useEffect(() => {
     let cancelled = false
     const nid = networkId?.trim() ?? ''
     if (!nid) {
       setSavedBundle({ manualGroups: [], positions: {} })
       setPersistedManualTraces([])
+      setSessionManualTraces([])
       return
     }
     void Promise.all([api.getMapLayout(nid), api.getMapManualTraces(nid)]).then(([bundle, traces]) => {
       if (cancelled) return
       setSavedBundle(bundle)
       setPersistedManualTraces(traces)
+      setSessionManualTraces([])
       setBundleReloadTick((t) => t + 1)
     })
     return () => {
@@ -996,6 +1103,7 @@ function MapCanvas({
       void Promise.all([api.getMapLayout(nid), api.getMapManualTraces(nid)]).then(([bundle, traces]) => {
         setSavedBundle(bundle)
         setPersistedManualTraces(traces)
+        setSessionManualTraces([])
         setBundleReloadTick((t) => t + 1)
       })
     })
@@ -1512,7 +1620,7 @@ function MapCanvas({
     if (layoutMode !== 'manual') {
       setNodesState(buildAutoLayoutNodes(devices, layoutMode, gw))
       setMapGraphRebuildTick((t) => t + 1)
-      setEdges(buildEdges(devices, persistedManualTraces))
+      setEdges(buildEdges(devices, manualTracesForView))
       prevLayoutModeRef.current = layoutMode
       return
     }
@@ -1551,14 +1659,14 @@ function MapCanvas({
       )
     )
     setMapGraphRebuildTick((t) => t + 1)
-    setEdges(buildEdges(devices, persistedManualTraces))
+    setEdges(buildEdges(devices, manualTracesForView))
     prevLayoutModeRef.current = layoutMode
     prevBundleReloadTickRef.current = bundleReloadTick
   }, [
     bundleReloadTick,
     devices,
     layoutMode,
-    persistedManualTraces,
+    manualTracesForView,
     savedBundle,
     networkInfo?.gateway,
     setEdges,
@@ -1854,6 +1962,11 @@ function MapCanvas({
   const applyTraceAuthoringConnectionType = useCallback((traceType: MapManualTraceConnectionType) => {
     tracePoCEpochRef.current += 1
     setMapTraceAuthoring({ traceType })
+    setTraceDraftStartEndpoint(null)
+    setTraceDraftRouting(false)
+    setTraceDraftEndSnapHover({ kind: 'neutral' })
+    setTracePathDraftPoints([])
+    setTracePathPreviewFlow(null)
     dismissTracePocCommitFeedback()
   }, [dismissTracePocCommitFeedback])
 
@@ -2026,8 +2139,11 @@ function MapCanvas({
         return
       }
       if (mapTraceAuthoring) {
-        const p = screenToFlowPosition({ x: event.clientX, y: event.clientY })
-        setTracePathDraftPoints((prev) => [...prev, p])
+        if (traceDraftStartEndpoint) {
+          const p = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+          setTracePathDraftPoints((prev) => [...prev, p])
+          setTraceDraftRouting(true)
+        }
         setInspectorPeekDeviceId(null)
         const next = clearSelection()
         setMapSelection(next)
@@ -2041,7 +2157,13 @@ function MapCanvas({
       commitSharedEquipmentFromMapSelection(next)
       blurNonInputFocusInMap()
     },
-    [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection, mapTraceAuthoring, screenToFlowPosition]
+    [
+      blurNonInputFocusInMap,
+      commitSharedEquipmentFromMapSelection,
+      mapTraceAuthoring,
+      screenToFlowPosition,
+      traceDraftStartEndpoint
+    ]
   )
 
   useEffect(() => {
@@ -2060,6 +2182,9 @@ function MapCanvas({
   useEffect(() => {
     if (!mapTraceAuthoring) {
       tracePoCEpochRef.current += 1
+      setTraceDraftStartEndpoint(null)
+      setTraceDraftRouting(false)
+      setTraceDraftEndSnapHover({ kind: 'neutral' })
       setTracePathDraftPoints([])
       setTracePathPreviewFlow(null)
       dismissTracePocCommitFeedback()
@@ -2071,10 +2196,14 @@ function MapCanvas({
   /** Drop stale snap highlight when trace family changes (inferred target snap id changes). */
   useEffect(() => {
     setTraceSnapHover(null)
+    setTraceDraftEndSnapHover({ kind: 'neutral' })
   }, [mapTraceAuthoring?.traceType])
 
   useEffect(() => {
-    if (layoutMode !== 'manual') setTraceSnapHover(null)
+    if (layoutMode !== 'manual') {
+      setTraceSnapHover(null)
+      setTraceDraftEndSnapHover({ kind: 'neutral' })
+    }
   }, [layoutMode])
 
   useEffect(() => {
@@ -2084,21 +2213,36 @@ function MapCanvas({
       const nextNodes = prev.map((n) => {
         if (n.type !== 'device') return n
         const dd = n.data as DeviceNodeData
-        const next = traceSnapHover
-        const prevH = dd.traceSnapHover ?? null
-        const same =
-          (prevH == null && next == null) ||
-          (prevH != null &&
-            next != null &&
-            prevH.deviceId === next.deviceId &&
-            prevH.snapPointId === next.snapPointId)
-        if (same) return n
+        const nextSnap = traceSnapHover
+        const prevSnap = dd.traceSnapHover ?? null
+        const snapSame =
+          (prevSnap == null && nextSnap == null) ||
+          (prevSnap != null &&
+            nextSnap != null &&
+            prevSnap.deviceId === nextSnap.deviceId &&
+            prevSnap.snapPointId === nextSnap.snapPointId)
+
+        const nextDraft = traceDraftEndSnapHover
+        const prevDraft = dd.traceDraftEndSnapHover ?? { kind: 'neutral' as const }
+        const draftSame =
+          prevDraft.kind === nextDraft.kind &&
+          (nextDraft.kind === 'neutral' ||
+            (nextDraft.kind === 'validEnd' &&
+              prevDraft.kind === 'validEnd' &&
+              prevDraft.target.deviceId === nextDraft.target.deviceId &&
+              prevDraft.target.snapPointId === nextDraft.target.snapPointId) ||
+            (nextDraft.kind === 'invalidEnd' &&
+              prevDraft.kind === 'invalidEnd' &&
+              prevDraft.target.deviceId === nextDraft.target.deviceId &&
+              prevDraft.target.snapPointId === nextDraft.target.snapPointId))
+
+        if (snapSame && draftSame) return n
         changed = true
-        return { ...n, data: { ...dd, traceSnapHover: next } }
+        return { ...n, data: { ...dd, traceSnapHover: nextSnap, traceDraftEndSnapHover: nextDraft } }
       })
       return changed ? nextNodes : prev
     })
-  }, [traceSnapHover, layoutMode, setNodesState])
+  }, [traceDraftEndSnapHover, traceSnapHover, layoutMode, setNodesState])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -2131,8 +2275,10 @@ function MapCanvas({
     onMarqueeViewportMove()
     if (
       (mapTraceAuthoringRef.current &&
-        (tracePathDraftPointsRef.current.length > 0 || tracePathPreviewFlowRef.current != null)) ||
-      persistedManualTracesRef.current.length > 0
+        (traceDraftStartEndpointRef.current != null ||
+          tracePathDraftPointsRef.current.length > 0 ||
+          tracePathPreviewFlowRef.current != null)) ||
+      manualTracesForViewRef.current.length > 0
     ) {
       setTracePathViewportTick((n) => n + 1)
     }
@@ -2142,7 +2288,60 @@ function MapCanvas({
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (layoutModeRef.current !== 'manual' || e.button !== 0 || !e.isPrimary) return
       if (spacePressedRef.current) return
-      if (mapTraceAuthoringRef.current) return
+      const auth = mapTraceAuthoringRef.current
+      if (auth) {
+        const t = e.target
+        if (t instanceof HTMLElement) {
+          const snapEl = t.closest('.map-device-node__snap-point')
+          if (snapEl instanceof HTMLElement) {
+            if (traceDraftStartEndpointRef.current) {
+              const deviceId = snapEl.dataset.deviceId
+              const snapPointId = snapEl.dataset.snapPointId
+              if (deviceId && snapPointId) {
+                const didCommit = commitSnapDraftToSession({
+                  clientX: e.clientX,
+                  clientY: e.clientY,
+                  endDeviceId: deviceId,
+                  endSnapPointId: snapPointId
+                })
+                if (didCommit) {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  blurNonInputFocusInMap()
+                  return
+                }
+              }
+              e.preventDefault()
+              e.stopPropagation()
+              blurNonInputFocusInMap()
+              return
+            }
+            const deviceId = snapEl.dataset.deviceId
+            const snapPointId = snapEl.dataset.snapPointId
+            const meta = snapPointId ? getSnapIdentity(snapPointId) : undefined
+            const isFamilySnap = meta?.type === auth.traceType
+            if (deviceId && snapPointId && isFamilySnap && !traceDraftStartEndpointRef.current) {
+              // S1 (TraceArmed) → S2 (DraftAnchored): snap click starts draft anchored to canonical endpoint identity.
+              e.preventDefault()
+              e.stopPropagation()
+              dismissTracePocCommitFeedback()
+              setTraceDraftStartEndpoint({ deviceId, snapPointId })
+              setTraceDraftRouting(false)
+              setTraceDraftEndSnapHover({ kind: 'neutral' })
+              setTracePathDraftPoints([])
+              setTracePathPreviewFlow(screenToFlowPosition({ x: e.clientX, y: e.clientY }))
+              blurNonInputFocusInMap()
+              return
+            }
+            // In trace mode, snaps must not fall through to body click/drag even if not a valid start snap.
+            e.preventDefault()
+            e.stopPropagation()
+            blurNonInputFocusInMap()
+            return
+          }
+        }
+        return
+      }
       const t = e.target
       if (!(t instanceof HTMLElement)) return
       if (t.closest('.react-flow__node')) return
@@ -2161,7 +2360,7 @@ function MapCanvas({
         /* ignore */
       }
     },
-    [screenToFlowPosition]
+    [blurNonInputFocusInMap, commitSnapDraftToSession, dismissTracePocCommitFeedback, screenToFlowPosition]
   )
 
   const onMapFlowPointerMove = useCallback(
@@ -2169,21 +2368,41 @@ function MapCanvas({
       const auth = mapTraceAuthoringRef.current
       const wrap = flowWrapRef.current
       if (auth && wrap && layoutModeRef.current === 'manual') {
-        const hit = pickTraceSnapHoverTarget(
-          e.clientX,
-          e.clientY,
-          wrap,
-          auth.traceType,
-          null
-        )
-        setTraceSnapHover((prev) => {
-          if (prev?.deviceId === hit?.deviceId && prev?.snapPointId === hit?.snapPointId) return prev
-          return hit
-        })
+        const draftStart = traceDraftStartEndpointRef.current
+        if (draftStart) {
+          setTraceSnapHover(null)
+          const q = pickTraceDraftEndSnapHover(e.clientX, e.clientY, wrap, auth.traceType, draftStart.deviceId)
+          setTraceDraftEndSnapHover((prev) => {
+            if (prev.kind !== q.kind) return q
+            if (q.kind === 'neutral') return prev
+            if (
+              prev.kind !== 'neutral' &&
+              prev.target.deviceId === q.target.deviceId &&
+              prev.target.snapPointId === q.target.snapPointId
+            ) {
+              return prev
+            }
+            return q
+          })
+        } else {
+          setTraceDraftEndSnapHover({ kind: 'neutral' })
+          const hit = pickTraceSnapHoverTarget(
+            e.clientX,
+            e.clientY,
+            wrap,
+            auth.traceType,
+            null
+          )
+          setTraceSnapHover((prev) => {
+            if (prev?.deviceId === hit?.deviceId && prev?.snapPointId === hit?.snapPointId) return prev
+            return hit
+          })
+        }
       } else {
         setTraceSnapHover((prev) => (prev ? null : prev))
+        setTraceDraftEndSnapHover((prev) => (prev.kind === 'neutral' ? prev : { kind: 'neutral' }))
       }
-      if (mapTraceAuthoringRef.current && tracePathDraftPointsRef.current.length > 0) {
+      if (mapTraceAuthoringRef.current && traceDraftStartEndpointRef.current) {
         const t = e.target
         if (
           t instanceof HTMLElement &&
@@ -2294,7 +2513,8 @@ function MapCanvas({
       )
     )
     setMapGraphRebuildTick((t) => t + 1)
-    setEdges(buildEdges(devices, persistedManualTraces))
+    setSessionManualTraces([])
+    setEdges(buildEdges(devices, manualTracesForView))
     window.setTimeout(() => fitView({ padding: 0.2, duration: 200 }), 60)
   }, [
     api,
@@ -2302,9 +2522,9 @@ function MapCanvas({
     devices,
     fitView,
     layoutMode,
+    manualTracesForView,
     networkId,
     networkInfo?.gateway,
-    persistedManualTraces,
     setEdges,
     setMapGraphRebuildTick,
     setMapSelection,
@@ -2978,6 +3198,7 @@ function MapCanvas({
               if (mapTraceAuthoringRef.current) {
                 setTracePathPreviewFlow(null)
                 setTraceSnapHover(null)
+                setTraceDraftEndSnapHover({ kind: 'neutral' })
               }
             }}
             onMouseDownCapture={(e) => {
@@ -3091,6 +3312,16 @@ function MapCanvas({
             ) : null}
             {manualChrome && mapTraceAuthoring ? (
               <MapTracePathDraftOverlay
+                startFlow={
+                  traceDraftStartEndpoint && flowWrapRef.current
+                    ? getTraceSnapAnchorFlowPosition(
+                        flowWrapRef.current,
+                        screenToFlowPosition,
+                        traceDraftStartEndpoint.deviceId,
+                        traceDraftStartEndpoint.snapPointId
+                      )
+                    : null
+                }
                 points={tracePathDraftPoints}
                 previewFlow={tracePathPreviewFlow}
                 wrapEl={flowWrapRef.current}
@@ -3099,9 +3330,9 @@ function MapCanvas({
                 traceFamily={mapTraceAuthoring.traceType}
               />
             ) : null}
-            {persistedManualTraces.length > 0 ? (
+            {manualTracesForView.length > 0 ? (
               <MapPersistedManualTracesOverlay
-                traces={persistedManualTraces}
+                traces={manualTracesForView}
                 wrapEl={flowWrapRef.current}
                 flowToScreenPosition={flowToScreenPosition}
                 viewportRev={tracePathViewportTick}
