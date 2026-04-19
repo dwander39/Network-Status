@@ -859,8 +859,6 @@ function MapCanvas({
   mapTraceAuthoringRef.current = mapTraceAuthoring
   tracePathDraftPointsRef.current = tracePathDraftPoints
   tracePathPreviewFlowRef.current = tracePathPreviewFlow
-  /** Step 5: first device click binds source; path is frozen until commit or cancel. */
-  const [traceEndpointSourceId, setTraceEndpointSourceId] = useState<string | null>(null)
   const [tracePocCommitFeedback, setTracePocCommitFeedback] = useState<TracePocCommitFeedback>(null)
   const [traceCommitSaving, setTraceCommitSaving] = useState(false)
   const tracePocFeedbackTimerRef = useRef<number | null>(null)
@@ -895,8 +893,6 @@ function MapCanvas({
       }
     }
   }, [])
-  const traceEndpointSourceRef = useRef<string | null>(null)
-  traceEndpointSourceRef.current = traceEndpointSourceId
   /** Step 12: proximity highlight target for visible trace snaps (presentation only). */
   const [traceSnapHover, setTraceSnapHover] = useState<TraceSnapHoverTarget | null>(null)
   const traceSnapHoverRef = useRef<TraceSnapHoverTarget | null>(null)
@@ -1821,7 +1817,6 @@ function MapCanvas({
         }
         setTracePathDraftPoints([])
         setTracePathPreviewFlow(null)
-        setTraceEndpointSourceId(null)
         presentTracePocCommitFeedback(
           {
             variant: 'success',
@@ -1859,7 +1854,6 @@ function MapCanvas({
   const applyTraceAuthoringConnectionType = useCallback((traceType: MapManualTraceConnectionType) => {
     tracePoCEpochRef.current += 1
     setMapTraceAuthoring({ traceType })
-    setTraceEndpointSourceId(null)
     dismissTracePocCommitFeedback()
   }, [dismissTracePocCommitFeedback])
 
@@ -1959,58 +1953,16 @@ function MapCanvas({
   )
 
   const onNodeClick = useCallback(
-    (_e: React.MouseEvent, node: Node) => {
+    (e: React.MouseEvent, node: Node) => {
       const nds = getNodes()
-      if (
-        node.type === 'device' &&
-        mapTraceAuthoring &&
-        tracePathDraftPoints.length > 0
-      ) {
-        if (!traceEndpointSourceId) {
-          dismissTracePocCommitFeedback()
-          setTraceEndpointSourceId(node.id)
-          const authSnap = mapTraceAuthoring
-          const wrapEl = flowWrapRef.current
-          if (authSnap && wrapEl) {
-            const snaps = inferSnapIdsForManualTrace(authSnap.traceType)
-            const anchor = getTraceSnapAnchorFlowPosition(
-              wrapEl,
-              screenToFlowPosition,
-              node.id,
-              snaps.sourceSnapPointId
-            )
-            if (anchor) {
-              setTracePathDraftPoints((prev) => {
-                if (prev.length === 0) return prev
-                const nextPts = [...prev]
-                nextPts[0] = { x: anchor.x, y: anchor.y }
-                return nextPts
-              })
-            }
-          }
-          setInspectorPeekDeviceId(null)
-          const next = selectDevice(node.id)
-          setMapSelection(next)
-          commitSharedEquipmentFromMapSelection(next)
+      if (mapTraceAuthoring) {
+        const t = e.target
+        if (t instanceof HTMLElement && t.closest('.map-device-node__snap-point')) {
+          // In trace mode, snap intent must beat device-body intent. Clicking a snap must not
+          // be interpreted as a device-body click (selection or otherwise).
+          e.stopPropagation()
           return
         }
-        if (node.id === traceEndpointSourceId) {
-          const msg = 'Pick a different device as the destination (not the source).'
-          presentTracePocCommitFeedback({ variant: 'invalid', message: msg }, 8000)
-          console.warn('[map trace POC]', msg)
-          return
-        }
-        dismissTracePocCommitFeedback()
-        const srcId = traceEndpointSourceId
-        void (async () => {
-          const ok = await commitManualTracePoc(srcId, node.id)
-          if (!ok) return
-          setInspectorPeekDeviceId(null)
-          const next = selectDevice(node.id)
-          setMapSelection(next)
-          commitSharedEquipmentFromMapSelection(next)
-        })()
-        return
       }
       if (node.type === 'device') {
         if (deviceChildOfLockedManualGroup(node, nds) && node.parentId) {
@@ -2038,15 +1990,10 @@ function MapCanvas({
       }
     },
     [
-      commitManualTracePoc,
       commitSharedEquipmentFromMapSelection,
-      dismissTracePocCommitFeedback,
       getNodes,
       mapTraceAuthoring,
-      presentTracePocCommitFeedback,
-      screenToFlowPosition,
       setSelectedEquipmentIds,
-      traceEndpointSourceId,
       tracePathDraftPoints.length
     ]
   )
@@ -2079,10 +2026,8 @@ function MapCanvas({
         return
       }
       if (mapTraceAuthoring) {
-        if (!traceEndpointSourceRef.current) {
-          const p = screenToFlowPosition({ x: event.clientX, y: event.clientY })
-          setTracePathDraftPoints((prev) => [...prev, p])
-        }
+        const p = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+        setTracePathDraftPoints((prev) => [...prev, p])
         setInspectorPeekDeviceId(null)
         const next = clearSelection()
         setMapSelection(next)
@@ -2117,17 +2062,16 @@ function MapCanvas({
       tracePoCEpochRef.current += 1
       setTracePathDraftPoints([])
       setTracePathPreviewFlow(null)
-      setTraceEndpointSourceId(null)
       dismissTracePocCommitFeedback()
       setTraceSnapHover(null)
       setTraceCommitSaving(false)
     }
   }, [dismissTracePocCommitFeedback, mapTraceAuthoring])
 
-  /** Drop stale snap highlight when source binding or trace family changes (inferred target snap id changes). */
+  /** Drop stale snap highlight when trace family changes (inferred target snap id changes). */
   useEffect(() => {
     setTraceSnapHover(null)
-  }, [mapTraceAuthoring?.traceType, traceEndpointSourceId])
+  }, [mapTraceAuthoring?.traceType])
 
   useEffect(() => {
     if (layoutMode !== 'manual') setTraceSnapHover(null)
@@ -2230,7 +2174,7 @@ function MapCanvas({
           e.clientY,
           wrap,
           auth.traceType,
-          traceEndpointSourceRef.current
+          null
         )
         setTraceSnapHover((prev) => {
           if (prev?.deviceId === hit?.deviceId && prev?.snapPointId === hit?.snapPointId) return prev
@@ -2882,7 +2826,6 @@ function MapCanvas({
               setPocAddDeviceOpen(false)
               setPocAddTileHover(null)
               dismissTracePocCommitFeedback()
-              setTraceEndpointSourceId(null)
               setMapTraceAuthoring({ traceType: 'DMX' })
             }}
           >
@@ -2973,9 +2916,7 @@ function MapCanvas({
                     <span className="map-flow-trace-authoring-banner__title">Trace authoring (POC)</span>
                     <span className="map-flow-trace-authoring-banner__meta muted">
                       Type <strong>{mapTraceAuthoring.traceType}</strong>
-                      {!traceEndpointSourceId
-                        ? ' · click empty map to add path points · dashed preview from last point · then click a device for source'
-                        : ' · path locked — click a different device as destination to save the trace'}
+                      {' · '}click empty map to add path points · dashed preview from last point
                       {' · '}
                       Esc or Cancel trace to exit
                     </span>
