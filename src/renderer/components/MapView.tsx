@@ -925,6 +925,65 @@ function MapCanvas({
     []
   )
 
+  const traceDebugEnabled =
+    typeof window !== 'undefined' && localStorage.getItem('system-status.mapTraceDebug') === '1'
+  const traceDebug = useCallback(
+    (label: string, data?: unknown) => {
+      if (!traceDebugEnabled) return
+      const ts = new Date().toISOString()
+      // eslint-disable-next-line no-console
+      console.log(`[map trace debug] ${ts} ${label}`, data ?? '')
+    },
+    [traceDebugEnabled]
+  )
+
+  /**
+   * Phase 2 — Step 2.5: explicit cancel returns to TraceArmed (S1) without exiting trace mode.
+   * Clears draft-local state only; preserves authoring mode and any committed traces.
+   */
+  const cancelActiveTraceDraft = useCallback(() => {
+    if (!mapTraceAuthoringRef.current) return
+    if (!traceDraftStartEndpointRef.current) return
+    traceDebug('cancelActiveTraceDraft', {
+      traceType: mapTraceAuthoringRef.current?.traceType,
+      start: traceDraftStartEndpointRef.current,
+      points: tracePathDraftPointsRef.current.length,
+      preview: tracePathPreviewFlowRef.current != null
+    })
+    setTraceDraftStartEndpoint(null)
+    setTraceDraftRouting(false)
+    setTraceDraftEndSnapHover({ kind: 'neutral' })
+    setTracePathDraftPoints([])
+    setTracePathPreviewFlow(null)
+    setTraceSnapHover(null)
+    dismissTracePocCommitFeedback()
+    setTracePathViewportTick((t) => t + 1)
+  }, [dismissTracePocCommitFeedback, traceDebug])
+
+  /**
+   * Phase 2 — Step 2.5: local backstep removes the most recent committed intermediate route point.
+   * Never removes the snap-anchored start endpoint.
+   */
+  const backstepActiveTraceDraft = useCallback(() => {
+    if (!mapTraceAuthoringRef.current) return
+    if (!traceDraftStartEndpointRef.current) return
+    traceDebug('backstepActiveTraceDraft', { pointsBefore: tracePathDraftPointsRef.current.length })
+    setTracePathDraftPoints((prev) => {
+      if (prev.length === 0) return prev
+      const next = prev.slice(0, -1)
+      setTraceDraftRouting(next.length > 0)
+      return next
+    })
+    setTracePathViewportTick((t) => t + 1)
+  }, [traceDebug])
+
+  useEffect(() => {
+    traceDebug('traceDraftStartEndpoint changed', {
+      value: traceDraftStartEndpoint,
+      traceType: mapTraceAuthoring?.traceType ?? null
+    })
+  }, [mapTraceAuthoring?.traceType, traceDebug, traceDraftStartEndpoint])
+
   useEffect(() => {
     return () => {
       if (tracePocFeedbackTimerRef.current != null) {
@@ -1783,6 +1842,13 @@ function MapCanvas({
       setTraceTypeMenuOpen(false)
       setTraceTypeMenuHover(null)
       setInspectorPeekDeviceId(null)
+      // Step 2.5: if actively drafting, Escape cancels draft but keeps trace mode on.
+      if (mapTraceAuthoringRef.current && traceDraftStartEndpointRef.current) {
+        e.preventDefault()
+        cancelActiveTraceDraft()
+        blurNonInputFocusInMap()
+        return
+      }
       setMapTraceAuthoring(null)
       const next = clearSelection()
       setMapSelection(next)
@@ -1791,7 +1857,24 @@ function MapCanvas({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [blurNonInputFocusInMap, commitSharedEquipmentFromMapSelection, setMapSelection])
+  }, [blurNonInputFocusInMap, cancelActiveTraceDraft, commitSharedEquipmentFromMapSelection, setMapSelection])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Backspace') return
+      const el = e.target
+      if (el instanceof HTMLElement && el.closest('input, textarea, select, [contenteditable="true"]')) {
+        return
+      }
+      if (!mapTraceAuthoringRef.current || !traceDraftStartEndpointRef.current) return
+      // Step 2.5: backstep is draft-local and must not destroy the whole draft.
+      e.preventDefault()
+      backstepActiveTraceDraft()
+      blurNonInputFocusInMap()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [backstepActiveTraceDraft, blurNonInputFocusInMap])
 
   useEffect(() => {
     if (!pocAddDeviceOpen) return
@@ -2208,11 +2291,13 @@ function MapCanvas({
 
   useEffect(() => {
     if (layoutMode !== 'manual') return
+    const nextAuthoringType = mapTraceAuthoring?.traceType ?? null
     setNodesState((prev) => {
       let changed = false
       const nextNodes = prev.map((n) => {
         if (n.type !== 'device') return n
         const dd = n.data as DeviceNodeData
+        const prevAuthoringType = dd.traceAuthoringType ?? null
         const nextSnap = traceSnapHover
         const prevSnap = dd.traceSnapHover ?? null
         const snapSame =
@@ -2236,13 +2321,22 @@ function MapCanvas({
               prevDraft.target.deviceId === nextDraft.target.deviceId &&
               prevDraft.target.snapPointId === nextDraft.target.snapPointId))
 
-        if (snapSame && draftSame) return n
+        if (snapSame && draftSame && prevAuthoringType === nextAuthoringType) return n
         changed = true
-        return { ...n, data: { ...dd, traceSnapHover: nextSnap, traceDraftEndSnapHover: nextDraft } }
+        return {
+          ...n,
+          data: {
+            ...dd,
+            traceSnapHover: nextSnap,
+            traceDraftEndSnapHover: nextDraft,
+            traceAuthoringType: nextAuthoringType
+          }
+        }
       })
       return changed ? nextNodes : prev
     })
-  }, [traceDraftEndSnapHover, traceSnapHover, layoutMode, setNodesState])
+    traceDebug('propagate traceAuthoringType to nodes', { traceType: nextAuthoringType })
+  }, [traceDraftEndSnapHover, traceSnapHover, layoutMode, mapTraceAuthoring?.traceType, setNodesState, traceDebug])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -2293,7 +2387,18 @@ function MapCanvas({
         const t = e.target
         if (t instanceof HTMLElement) {
           const snapEl = t.closest('.map-device-node__snap-point')
+          traceDebug('pointerdown(trace mode)', {
+            targetTag: t.tagName,
+            targetClasses: t.className,
+            closestSnap: snapEl instanceof HTMLElement,
+            traceType: auth.traceType
+          })
           if (snapEl instanceof HTMLElement) {
+            traceDebug('snapEl dataset', {
+              deviceId: snapEl.dataset.deviceId,
+              snapPointId: snapEl.dataset.snapPointId,
+              traceFamily: snapEl.dataset.traceFamily
+            })
             if (traceDraftStartEndpointRef.current) {
               const deviceId = snapEl.dataset.deviceId
               const snapPointId = snapEl.dataset.snapPointId
@@ -2305,10 +2410,24 @@ function MapCanvas({
                   endSnapPointId: snapPointId
                 })
                 if (didCommit) {
+                  traceDebug('snap click committed draft end', { deviceId, snapPointId })
                   e.preventDefault()
                   e.stopPropagation()
                   blurNonInputFocusInMap()
                   return
+                }
+                // Step 2.5: invalid end snap clicks must preserve draft progress (no commit, no mutation).
+                const hover = traceDraftEndSnapHoverRef.current
+                if (
+                  hover.kind === 'invalidEnd' &&
+                  hover.target.deviceId === deviceId &&
+                  hover.target.snapPointId === snapPointId
+                ) {
+                  traceDebug('snap click invalidEnd (preserve draft)', { deviceId, snapPointId })
+                  presentTracePocCommitFeedback(
+                    { variant: 'invalid', message: 'That snap can’t be used as the end target yet. Pick a valid end snap or keep routing.' },
+                    2400
+                  )
                 }
               }
               e.preventDefault()
@@ -2320,11 +2439,19 @@ function MapCanvas({
             const snapPointId = snapEl.dataset.snapPointId
             const meta = snapPointId ? getSnapIdentity(snapPointId) : undefined
             const isFamilySnap = meta?.type === auth.traceType
+            traceDebug('start eligibility', {
+              deviceId,
+              snapPointId,
+              snapMeta: meta ?? null,
+              traceType: auth.traceType,
+              isFamilySnap
+            })
             if (deviceId && snapPointId && isFamilySnap && !traceDraftStartEndpointRef.current) {
               // S1 (TraceArmed) → S2 (DraftAnchored): snap click starts draft anchored to canonical endpoint identity.
               e.preventDefault()
               e.stopPropagation()
               dismissTracePocCommitFeedback()
+              traceDebug('setTraceDraftStartEndpoint', { deviceId, snapPointId })
               setTraceDraftStartEndpoint({ deviceId, snapPointId })
               setTraceDraftRouting(false)
               setTraceDraftEndSnapHover({ kind: 'neutral' })
@@ -2334,6 +2461,12 @@ function MapCanvas({
               return
             }
             // In trace mode, snaps must not fall through to body click/drag even if not a valid start snap.
+            traceDebug('snap click in trace mode but not a valid start snap (blocked)', {
+              deviceId,
+              snapPointId,
+              traceType: auth.traceType,
+              snapMeta: meta ?? null
+            })
             e.preventDefault()
             e.stopPropagation()
             blurNonInputFocusInMap()
@@ -2360,7 +2493,14 @@ function MapCanvas({
         /* ignore */
       }
     },
-    [blurNonInputFocusInMap, commitSnapDraftToSession, dismissTracePocCommitFeedback, screenToFlowPosition]
+    [
+      blurNonInputFocusInMap,
+      commitSnapDraftToSession,
+      dismissTracePocCommitFeedback,
+      presentTracePocCommitFeedback,
+      screenToFlowPosition,
+      traceDebug
+    ]
   )
 
   const onMapFlowPointerMove = useCallback(

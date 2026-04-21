@@ -6,7 +6,7 @@ import {
   mapPocVisualDeviceTypeLabel,
   parseMapPocVisualDeviceType
 } from '@shared/mapPocVisualDeviceTypes'
-import { MAP_DEVICE_SNAP_DATA_IN, MAP_DEVICE_SNAP_DATA_OUT } from '@shared/mapDeviceSnapPoints'
+import { inferSnapIdsForManualTrace, MAP_DEVICE_SNAP_DATA_IN, MAP_DEVICE_SNAP_DATA_OUT } from '@shared/mapDeviceSnapPoints'
 import { traceFamilyToCssSuffix } from '@shared/mapTraceFamilyVisual'
 import type { TraceSnapHoverTarget } from '@shared/mapTraceSnapHoverPick'
 import type { TraceDraftEndSnapHover } from '@shared/mapTraceSnapDraftEndHoverPick'
@@ -24,6 +24,8 @@ export type DeviceNodeData = {
   traceSnapHover?: TraceSnapHoverTarget | null
   /** Step 2.3: draft-time end snap hover qualification (presentation only). */
   traceDraftEndSnapHover?: TraceDraftEndSnapHover
+  /** Phase 2: active authoring family (controls which snap handles are rendered). */
+  traceAuthoringType?: MapManualTraceConnectionType | null
 }
 
 export type DeviceFlowNode = Node<DeviceNodeData, 'device'>
@@ -78,28 +80,34 @@ function DeviceNodeInner({ data, selected }: NodeProps<DeviceFlowNode>): JSX.Ele
 
   const collapseTitle = collapsed ? 'Expand device card' : 'Collapse device card'
 
+  const activeType: MapManualTraceConnectionType =
+    data.traceAuthoringType ?? DMX_TRACE_FAMILY
+  const inferred = inferSnapIdsForManualTrace(activeType)
+  const snapInId = inferred.destinationSnapPointId
+  const snapOutId = inferred.sourceSnapPointId
+
   const hover = data.traceSnapHover
   const draftHover = data.traceDraftEndSnapHover ?? { kind: 'neutral' as const }
   const dmxInHover =
-    hover != null && hover.deviceId === d.id && hover.snapPointId === MAP_DEVICE_SNAP_DATA_IN
+    hover != null && hover.deviceId === d.id && hover.snapPointId === snapInId
   const dmxOutHover =
-    hover != null && hover.deviceId === d.id && hover.snapPointId === MAP_DEVICE_SNAP_DATA_OUT
+    hover != null && hover.deviceId === d.id && hover.snapPointId === snapOutId
   const dmxInDraftValid =
     draftHover.kind === 'validEnd' &&
     draftHover.target.deviceId === d.id &&
-    draftHover.target.snapPointId === MAP_DEVICE_SNAP_DATA_IN
+    draftHover.target.snapPointId === snapInId
   const dmxOutDraftValid =
     draftHover.kind === 'validEnd' &&
     draftHover.target.deviceId === d.id &&
-    draftHover.target.snapPointId === MAP_DEVICE_SNAP_DATA_OUT
+    draftHover.target.snapPointId === snapOutId
   const dmxInDraftInvalid =
     draftHover.kind === 'invalidEnd' &&
     draftHover.target.deviceId === d.id &&
-    draftHover.target.snapPointId === MAP_DEVICE_SNAP_DATA_IN
+    draftHover.target.snapPointId === snapInId
   const dmxOutDraftInvalid =
     draftHover.kind === 'invalidEnd' &&
     draftHover.target.deviceId === d.id &&
-    draftHover.target.snapPointId === MAP_DEVICE_SNAP_DATA_OUT
+    draftHover.target.snapPointId === snapOutId
 
   return (
     <div
@@ -107,7 +115,7 @@ function DeviceNodeInner({ data, selected }: NodeProps<DeviceFlowNode>): JSX.Ele
     >
       <Handle className="map-flow__handle" type="target" position={Position.Top} />
       <Handle
-        id={MAP_DEVICE_SNAP_DATA_IN}
+        id={snapInId}
         className={`map-device-node__snap-point map-device-node__snap-point--in nodrag nopan${
           dmxInDraftValid
             ? ' map-device-node__snap-point--trace-hover-valid'
@@ -120,14 +128,14 @@ function DeviceNodeInner({ data, selected }: NodeProps<DeviceFlowNode>): JSX.Ele
         type="target"
         position={Position.Left}
         isConnectable={false}
-        data-trace-family={traceFamilyToCssSuffix(DMX_TRACE_FAMILY)}
+        data-trace-family={traceFamilyToCssSuffix(activeType)}
         data-device-id={d.id}
-        data-snap-point-id={MAP_DEVICE_SNAP_DATA_IN}
-        title="Trace anchor: DMX in (data-in)"
-        aria-label="Trace anchor DMX in"
+        data-snap-point-id={snapInId}
+        title={`Trace anchor: ${activeType} in`}
+        aria-label={`Trace anchor ${activeType} in`}
       />
       <Handle
-        id={MAP_DEVICE_SNAP_DATA_OUT}
+        id={snapOutId}
         className={`map-device-node__snap-point map-device-node__snap-point--out nodrag nopan${
           dmxOutDraftValid
             ? ' map-device-node__snap-point--trace-hover-valid'
@@ -140,11 +148,11 @@ function DeviceNodeInner({ data, selected }: NodeProps<DeviceFlowNode>): JSX.Ele
         type="source"
         position={Position.Right}
         isConnectable={false}
-        data-trace-family={traceFamilyToCssSuffix(DMX_TRACE_FAMILY)}
+        data-trace-family={traceFamilyToCssSuffix(activeType)}
         data-device-id={d.id}
-        data-snap-point-id={MAP_DEVICE_SNAP_DATA_OUT}
-        title="Trace anchor: DMX out (data-out)"
-        aria-label="Trace anchor DMX out"
+        data-snap-point-id={snapOutId}
+        title={`Trace anchor: ${activeType} out`}
+        aria-label={`Trace anchor ${activeType} out`}
       />
       {collapsed ? (
         <div className="map-device-node__collapsed-row">
