@@ -6,16 +6,25 @@ import { v4 as uuidv4 } from 'uuid'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { normalizeNetworkId } from '../services/networkDetection'
 import { backfillMissingEquipmentValuesJsonMirrors } from './deviceRepository'
+import { DATABASE_FILE_NAME } from '../appIdentity'
 
 let db: Database.Database | null = null
+let userDataPrepared = false
+
+/** Called once the legacy-data migration step has completed; until then `getDatabase()` refuses to open. */
+export function markUserDataPrepared(): void {
+  userDataPrepared = true
+}
 
 /** Open SQLite in userData; create schema and default settings on first run. */
 export function getDatabase(): Database.Database {
   if (db) return db
+  // Opening early would create an empty canonical DB and make the legacy migration skip existing data.
+  if (!userDataPrepared) throw new Error('getDatabase() called before user-data preparation (legacy migration)')
 
   const dir = app.getPath('userData')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  db = openDatabaseAtPath(join(dir, 'system-status.db'))
+  db = openDatabaseAtPath(join(dir, DATABASE_FILE_NAME))
   return db
 }
 

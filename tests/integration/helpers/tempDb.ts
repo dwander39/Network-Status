@@ -14,7 +14,7 @@ export interface TempDb {
 
 /** Fully migrated SQLite database in its own temp directory; never touches the user's real data. */
 export function createTempDb(): TempDb {
-  const dir = mkdtempSync(join(tmpdir(), 'system-status-test-'))
+  const dir = mkdtempSync(join(tmpdir(), 'network-status-test-'))
   const path = join(dir, 'test.db')
   const handle: TempDb = {
     db: openDatabaseAtPath(path),

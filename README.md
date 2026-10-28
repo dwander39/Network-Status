@@ -5,11 +5,12 @@ devices you care about on each LAN, pings them on an interval, reads the OS ARP/
 discover other hosts, records events, raises desktop notifications and custom alert rules, and draws
 a manual/auto topology map.
 
-> **Naming:** the GitHub repository is **Network-Status**. Inside the app the product is still
-> called **System Status** (`package.json` `name: system-status`, `productName: System Status`).
-> The name is left unchanged on purpose: Electron derives the user-data folder, and so the location
-> of the existing SQLite database, from it. Renaming needs a planned data migration (see
-> [docs/CURRENT-STATE.md](docs/CURRENT-STATE.md#candidate-future-work)).
+> **Naming:** the product is **Network Status** (repository **Network-Status**, package
+> `network-status`). It was called **System Status** until Phase 0B. Data from earlier installs in
+> `%APPDATA%\system-status\` is copied once, on first start, into `%APPDATA%\network-status\`.
+> The original folder is left intact. A few identifiers deliberately keep the old name for
+> install/upgrade continuity, such as the installer `appId` `com.systemstatus.app`. See
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#product-identity-and-legacy-data-migration).
 
 ## Quick start
 

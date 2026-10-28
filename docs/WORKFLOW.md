@@ -32,6 +32,13 @@ Every work package or phase goes through, in order:
 
 - Default branch `main`; remote `origin` = Network-Status. The earlier GitHub repo
   `dwander39/SystemStatus` is kept as remote `systemstatus` (history is identical up to the baseline).
+  It is historical: never push to it.
+- The product was renamed from System Status to **Network Status** in Phase 0B. Historical commits,
+  `docs/archive/` and `extraction-for-rebuild/` keep the old name on purpose; do not rewrite them.
+  Legacy identifiers that must keep the old name are listed in `docs/ARCHITECTURE.md`
+  ("Product identity and legacy data migration").
+- Never run the app against your real `%APPDATA%` data to test migration behavior. Use
+  `NETWORK_STATUS_APP_DATA_ROOT` with copied data (see `docs/MANUAL-UI-CHECKLIST.md` section 9).
 - Commit subjects follow `type(scope): summary` (e.g. `feat(map): …`, `fix(arp): …`, `chore(baseline): …`).
 - Keep each file's existing line endings until a dedicated normalization commit lands.
 - `out/`, `release/`, `node_modules/`, `.env*`, logs and `.cursor/` are git-ignored.

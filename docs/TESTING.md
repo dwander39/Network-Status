@@ -30,7 +30,7 @@ Forward Vitest arguments with `--`, e.g. `npm run test:integration -- tests/inte
   the scheduler test mocks the probe and adapter modules and uses fake timers.
 - Tests are included in `npm run typecheck`.
 
-## Current coverage (75 tests)
+## Current coverage (106 tests: 51 unit, 55 integration)
 
 | Area | Suite | Behaviors protected |
 |---|---|---|
@@ -44,6 +44,11 @@ Forward Vitest arguments with `--`, e.g. `npm run test:integration -- tests/inte
 | Device mutations | `integration/deviceMutations` | Create/update/delete, validation, IP uniqueness, groups, monitoring/discovery write paths, network-scoped listing |
 | ARP persistence | `integration/arpRepository` | Upsert/normalize, network-scoped snapshot prune, MAC-change confirmation (regression), discovered list exclusions |
 | Scheduler | `integration/scheduler` | Adapter-subnet filtering, no overlapping ping rounds (regression), monitoring-paused state, stop() |
+| Product identity (Phase 0B) | `unit/appIdentity` | Canonical `network-status` / legacy `system-status` paths, isolated-testing override, call order of name → AUMID → `userData`, legacy AUMID on Windows only |
+| Legacy data migration (Phase 0B) | `integration/legacyDataMigration` | Real SQLite fixtures built with the app's repositories. Covers: fresh install (no legacy dir created); migration of devices/settings/profiles/events/map data, **including rows present only in an uncheckpointed `-wal`** (the fixture is shown to be meaningful: the main file alone holds 0 devices); self-contained output file; legacy directory byte-identical with no files added; migration record matches actual row counts; Chromium profile/`-shm` not copied; existing canonical DB never replaced or merged, with or without legacy data present; idempotent repeated launches with later legacy writes not re-imported; refusal when a recorded migration's DB has gone missing; cleanup of an interrupted migration; partial temp file never treated as valid; refusal while legacy is running (before and during the copy); a canonical DB appearing mid-migration is left untouched; non-SQLite, corrupted, empty and foreign legacy files rejected without creating a DB; `getDatabase()` gated until preparation has run; `SingletonLock` parsing; Windows `lockfile` probe against a real share-mode lock held by another process (Windows-only test) |
+
+The migration suite's WAL cases were checked against a deliberate mutation: making the code copy only
+the `.db` file fails 4 of them.
 
 ## Known gaps (intentionally not yet covered)
 
@@ -55,7 +60,12 @@ Forward Vitest arguments with `--`, e.g. `npm run test:integration -- tests/inte
   them needs either extraction into testable modules or an Electron-level harness.
 - **Alert rules engine and event log service**: only exercised indirectly.
 - **Live OS behavior** (real `ping`, real `arp`, non-English Windows, Linux): manual only.
-- **Packaged build** (`npm run build` installer): manual only.
+- **Packaged build** (`npm run build` installer): manual only. That includes the NSIS upgrade from a
+  System Status install (shortcut rename, install folder reuse), which has not been exercised.
+- **Main-process startup wiring** (`applyAppIdentity` → lock → `prepareUserDataDirectory` → error
+  dialog) is not under automated test. It was observed once in an isolated launch during Phase 0B;
+  see `docs/MANUAL-UI-CHECKLIST.md` section 9.
+- **macOS/Linux** `SingletonLock` liveness check: only the parser is tested.
 
 ## Expectations for future phases
 

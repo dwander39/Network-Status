@@ -1,4 +1,5 @@
 import { app, Menu, nativeImage, Tray, BrowserWindow } from 'electron'
+import { PRODUCT_NAME } from './appIdentity'
 
 /** Minimal 16×16 PNG so Tray works on Windows/macOS without bundling assets yet. */
 const PLACEHOLDER_PNG = Buffer.from(
@@ -35,7 +36,7 @@ export function createTray(
       }
     ])
 
-  tray.setToolTip(getSummary?.() ?? 'System Status')
+  tray.setToolTip(getSummary?.() ?? PRODUCT_NAME)
   tray.setContextMenu(buildMenu())
 
   tray.on('click', () => {
@@ -52,5 +53,5 @@ export function createTray(
 
 export function updateTrayTooltip(tray: Tray | null, getSummary?: () => string): void {
   if (!tray) return
-  tray.setToolTip(getSummary?.() ?? 'System Status')
+  tray.setToolTip(getSummary?.() ?? PRODUCT_NAME)
 }

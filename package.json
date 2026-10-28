@@ -1,5 +1,5 @@
 {
-  "name": "system-status",
+  "name": "network-status",
   "version": "1.0.0",
   "description": "Cross-platform network device monitor",
   "main": "out/main/index.js",
@@ -40,7 +40,7 @@
   },
   "build": {
     "appId": "com.systemstatus.app",
-    "productName": "System Status",
+    "productName": "Network Status",
     "directories": {
       "output": "release"
     },

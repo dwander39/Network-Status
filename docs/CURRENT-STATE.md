@@ -1,12 +1,18 @@
 # Current application state
 
-Baseline recorded **2026-10-28** during the baseline-recovery work package. Classifications come
-from reading the code and from automated tests. Nothing below has been manually UI-verified yet;
-items that need a human are marked **UNKNOWN / manual**.
+Baseline recorded **2026-10-28** during the baseline-recovery work package (Phase 0A, commit
+`03b0808`), then updated by **Phase 0B** (product rename and legacy data migration, same day).
+Classifications come from reading the code and from automated tests. Nothing below has been manually
+UI-verified yet; items that need a human are marked **UNKNOWN / manual**.
+
+**Phase 0 status: not final-locked.** Phase 0A and Phase 0B are both awaiting independent Codex
+verification and user manual UI acceptance.
 
 Status key: **WORKING** · **PARTIAL** · **BROKEN** · **PLACEHOLDER** · **APPARENTLY UNUSED** · **UNKNOWN / manual**
 
 ## What the app is
+
+The product is **Network Status**. It was named **System Status** before Phase 0B.
 
 A tray-resident Electron desktop app that monitors devices on whichever LAN the machine is
 connected to. Each LAN is fingerprinted as `gateway|cidr` (the "network id"). Devices, ARP history,
@@ -79,12 +85,37 @@ shows each network's own data.
 
 ### Persistence and state that survives restart
 
-- SQLite file `system-status.db` in Electron `userData` (Windows: `%APPDATA%\system-status\`).
+- SQLite file `network-status.db` in Electron `userData` (Windows: `%APPDATA%\network-status\`).
+  Before Phase 0B this was `%APPDATA%\system-status\system-status.db`. That data is copied once on
+  first start and the legacy folder is never modified (see "Phase 0B" below).
   It holds devices, list groups, ARP entries plus MAC-change history and candidates, dismissed IPs,
   settings, network profiles, alert rules, event logs, map positions, manual groups and manual traces.
 - `localStorage` (renderer): collapse state of panels, inspector width, debug flags.
 - **Not persisted:** extra table columns, column visibility/widths, drafted traces, "ignored"
   new networks, shared selection, "already notified" unknown IPs.
+
+## Phase 0B: product rename and legacy data migration
+
+Design and identifier table: [ARCHITECTURE.md → Product identity and legacy data migration](ARCHITECTURE.md#product-identity-and-legacy-data-migration).
+
+| Item | Implemented | Automatically verified | Awaiting Codex | Awaiting manual |
+|---|---|---|---|---|
+| Display name **Network Status**: window title, tray tooltip, startup/migration error dialogs, `app.setName`, `build.productName` | Yes | Partly: identity unit tests; main-window title observed in an isolated launch | Yes | Yes: pop-out title, tray, packaged exe/installer names |
+| Package `name` `network-status` (lockfile root entries only) | Yes | typecheck/build | Yes | n/a |
+| `userData` pinned to `<appData>/network-status` before the single-instance lock | Yes | Unit tests (`appIdentity`); observed in an isolated launch | Yes | Yes |
+| Legacy AUMID kept (`electron.app.system-status`), `appId` kept (`com.systemstatus.app`) | Yes | Unit test (AUMID) | Yes | Installer upgrade: **not verified** |
+| One-time legacy DB migration (WAL-safe raw copy → `VACUUM INTO` → validate → atomic rename) | Yes | 26 integration tests; isolated launch migrated a synthetic WAL fixture and was a no-op on relaunch | Yes | Yes (checklist section 9) |
+| Failure handling: error dialog and exit, no empty DB, legacy untouched | Yes | Integration tests (in use, corrupt, non-SQLite, empty, foreign, canonical missing, concurrent canonical) | Yes | Yes: dialog wording/visibility |
+| `getDatabase()` gated until migration has run | Yes | Integration test | Yes | n/a |
+
+**User-visible changes:** new name everywhere in the UI. Panel-collapse and map-inspector-width
+preferences (renderer `localStorage`) reset once, because the Chromium profile is not migrated.
+If System Status is still running, Network Status refuses to start until it is closed.
+
+**Outstanding uncertainties**
+- Installer upgrade over an existing System Status install has not been exercised.
+- macOS/Linux running-instance detection (`SingletonLock`) is implemented, but only its parser is tested.
+- Taskbar pins that point at the old executable path may need re-pinning after the exe rename (not verified).
 
 ## Known defects and technical debt
 
@@ -105,6 +136,8 @@ Severity: **blocker / high / medium / low / informational**.
 | D11 | low | Debug/maintenance IPC (`debug*EquipmentMirror*`) is registered in production builds (read-only). |
 | D12 | low | Line endings are mixed in the repo (88 CRLF / 26 LF files at baseline); no `.gitattributes`. |
 | D13 | low | Placeholder tray icon; no app icon assets. |
+| D16 | low | The NSIS shortcut AUMID (`com.systemstatus.app`) differs from the process AUMID (`electron.app.system-status`). Pre-existing; preserved by Phase 0B for continuity. Aligning them is a separate decision. |
+| D17 | informational | Some internal identifiers still use the old name on purpose: `window.ssApi`, the `SystemStatusApi` type, renderer `localStorage` keys `system-status*`, and `appId`. |
 | D14 | informational | "DMX" naming (entertainment-lighting term) is used for generic links; three overlapping device models (flat `Device`, `equipment_values_json` mirror, runtime projection). See `extraction-for-rebuild/13-risky-legacy-areas-review.md`. |
 | D15 | informational | No linter/formatter configured; TypeScript strict typecheck is the static gate. |
 
@@ -139,6 +172,7 @@ Derived only from the findings above. Nothing here is approved; scheduling is th
    layout if wanted (D5, D9, D10).
 5. **Multi-window push consistency** (D7).
 6. **Locale-independent network identity**, plus a replacement for macOS `airport` (D6).
-7. **Product rename** System Status → Network Status, including a user-data/DB migration.
+7. ~~Product rename System Status → Network Status, including a user-data/DB migration.~~
+   Implemented in Phase 0B; awaiting verification.
 8. **UI/component and end-to-end smoke tests** (see `docs/TESTING.md` gaps).
 9. **`.gitattributes`** line-ending normalization as its own isolated commit (D12).

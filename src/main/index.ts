@@ -2,7 +2,9 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, type MenuItemConstructorOpti
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { writeFile } from 'fs/promises'
-import { getDatabase, closeDatabase } from './db/database'
+import { getDatabase, closeDatabase, markUserDataPrepared } from './db/database'
+import { applyAppIdentity, DATABASE_FILE_NAME, LEGACY_DATABASE_FILE_NAME, PRODUCT_NAME } from './appIdentity'
+import { prepareUserDataDirectory } from './legacyDataMigration'
 import {
   debugResolveEquipmentRuntimeProjectionWithJsonHydration,
   listDevices,
@@ -95,11 +97,14 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+// Name, AUMID and userData must be fixed before the single-instance lock and any userData consumer.
+const userDataLayout = applyAppIdentity(app)
+
 // Fail fast with clear logging when a startup-time async error occurs (e.g. migration failure).
 process.on('unhandledRejection', (reason) => {
   console.error('[main] Unhandled promise rejection', reason)
   try {
-    dialog.showErrorBox('System Status startup error', String(reason instanceof Error ? reason.message : reason))
+    dialog.showErrorBox(`${PRODUCT_NAME} startup error`, String(reason instanceof Error ? reason.message : reason))
   } catch {
     /* ignore */
   }
@@ -318,8 +323,8 @@ function traySummary(): string {
   const db = getDatabase()
   const devices = listDevices(db, uiNetworkId())
   const offline = devices.filter((d) => d.lastStatus === 'offline').length
-  if (offline === 0) return 'System Status — all online'
-  return `System Status — ${offline} offline`
+  if (offline === 0) return `${PRODUCT_NAME} — all online`
+  return `${PRODUCT_NAME} — ${offline} offline`
 }
 
 function refreshTray(): void {
@@ -992,6 +997,25 @@ if (!gotLock) {
   })
 
   app.whenReady().then(async () => {
+    // Before anything opens the database: copy pre-rename data once, or refuse to start.
+    try {
+      const prep = prepareUserDataDirectory({
+        canonicalDir: userDataLayout.userDataDir,
+        canonicalDatabaseFileName: DATABASE_FILE_NAME,
+        legacyDir: userDataLayout.legacyUserDataDir,
+        legacyDatabaseFileName: LEGACY_DATABASE_FILE_NAME
+      })
+      if (prep.outcome === 'migrated') {
+        console.info(`[main] migrated System Status data from ${prep.record.sourceDatabasePath}`)
+      }
+    } catch (e) {
+      console.error('[main] user-data preparation failed', e)
+      // LegacyDataMigrationError messages are written for the user (what happened, paths, what to do).
+      dialog.showErrorBox(`${PRODUCT_NAME} could not load its data`, e instanceof Error ? e.message : String(e))
+      app.exit(1)
+      return
+    }
+    markUserDataPrepared()
     getDatabase()
     eventLogs = new EventLogService(getDatabase(), pushEventToRenderer)
     eventLogs.setEventSeverityOverrides(getSettings(getDatabase()).eventLogSeverityOverrides)
