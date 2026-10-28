@@ -39,6 +39,7 @@ import {
   mapPocVisualDeviceTypeDefaultDeviceType,
   mapPocVisualDeviceTypeEmoji,
   mapPocVisualDeviceTypeLabel,
+  maxPocVisualDeviceNameSeq,
   type MapPocVisualDeviceType
 } from '@shared/mapPocVisualDeviceTypes'
 import { getSnapIdentity, inferSnapIdsForManualTrace } from '@shared/mapDeviceSnapPoints'
@@ -2791,15 +2792,7 @@ function MapCanvas({
         /* Names like "Lighting Fixture 3" from existing persisted POC rows (`deviceTypeCustom` slug). */
         // Seed from already-loaded persisted device list; tie-break with a local ref to avoid
         // collisions when the user creates multiple devices faster than ON_DEVICES_CHANGED pushes.
-        const re = new RegExp(`^${label.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s+(\\\\d+)$`, 'i')
-        let maxSeen = 0
-        for (const d of devices) {
-          if (d.deviceTypeCustom?.trim() !== slug) continue
-          const m = re.exec(d.name.trim())
-          if (!m) continue
-          const n = Number(m[1])
-          if (Number.isFinite(n)) maxSeen = Math.max(maxSeen, n)
-        }
+        const maxSeen = maxPocVisualDeviceNameSeq(slug, devices)
         const prev = pocNameSeqRef.current[slug] ?? 0
         const next = Math.max(maxSeen, prev) + 1
         pocNameSeqRef.current[slug] = next

@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
   type MouseEvent,
-  type PointerEvent
+  type PointerEvent as ReactPointerEvent
 } from 'react'
 import { getDeviceTypeDisplayLabel } from '@shared/deviceTypeDisplay'
 import type { Device, DeviceGroup, DeviceStatus, SaveDevicePayload } from '@shared/types'
@@ -444,7 +444,7 @@ export function DeviceTable({
     }
   }, [])
 
-  function handleDeviceRowPointerDown(d: Device, e: PointerEvent<HTMLTableRowElement>): void {
+  function handleDeviceRowPointerDown(d: Device, e: ReactPointerEvent<HTMLTableRowElement>): void {
     if (e.button !== 0) return
     if (e.shiftKey) return
     const tgt = e.target as HTMLElement

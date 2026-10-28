@@ -93,11 +93,13 @@ export function startScheduler(
     }
   }
 
-  let lastPingErrorAt = 0
-  let lastArpErrorAt = 0
+  // A ping round can outlast the interval (e.g. many offline hosts at the 4s probe timeout);
+  // skip ticks while one is running so rounds never stack up.
+  let pingInFlight = false
 
   const runPing = async (): Promise<void> => {
-    if (stopped) return
+    if (stopped || pingInFlight) return
+    pingInFlight = true
     try {
       const settings = getSettings(db)
       if (settings.listenAdapterNames.length === 0) {
@@ -153,9 +155,6 @@ export function startScheduler(
       pushDevices()
       options?.onDevicesUpdated?.()
     } catch (e) {
-      // Avoid spamming: only surface ping loop failures at most once per minute.
-      const now = Date.now()
-      if (now - lastPingErrorAt > 60_000) lastPingErrorAt = now
       options?.eventLogs?.logSystemErrorThrottled({
         key: 'scheduler.runPing',
         module: 'scheduler',
@@ -163,6 +162,8 @@ export function startScheduler(
         error: e,
         networkId: getLastNetworkContext()?.networkId ?? getStableNetworkId() ?? null
       })
+    } finally {
+      pingInFlight = false
     }
   }
 
@@ -180,8 +181,6 @@ export function startScheduler(
       onDiscoveryScanComplete(db, discovered, nid, options?.eventLogs)
       pushArp()
     } catch (e) {
-      const now = Date.now()
-      if (now - lastArpErrorAt > 60_000) lastArpErrorAt = now
       options?.eventLogs?.logSystemErrorThrottled({
         key: 'scheduler.runArp',
         module: 'scheduler',

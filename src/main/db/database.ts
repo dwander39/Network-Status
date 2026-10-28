@@ -15,12 +15,20 @@ export function getDatabase(): Database.Database {
 
   const dir = app.getPath('userData')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  const path = join(dir, 'system-status.db')
-  db = new Database(path)
-  db.pragma('journal_mode = WAL')
-  db.pragma('foreign_keys = ON')
+  db = openDatabaseAtPath(join(dir, 'system-status.db'))
+  return db
+}
 
-  db.exec(`
+/**
+ * Open (or create) a SQLite file and bring its schema up to date.
+ * Electron-free so tests can run it against isolated temp files.
+ */
+export function openDatabaseAtPath(path: string): Database.Database {
+  const database = new Database(path)
+  database.pragma('journal_mode = WAL')
+  database.pragma('foreign_keys = ON')
+
+  database.exec(`
     CREATE TABLE IF NOT EXISTS devices (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -55,30 +63,30 @@ export function getDatabase(): Database.Database {
     );
   `)
 
-  migrateDeviceGroupsSchema(db)
-  migrateDeviceInsightsSchema(db)
-  migrateArpMacChangeLog(db)
-  migrateNetworkIdSchema(db)
-  migrateNetworkProfilesSchema(db)
-  migrateAlertRulesSchema(db)
-  migrateAlertRulesEventLogSeverityColumn(db)
-  migrateMapLayoutSchema(db)
-  migrateMapManualGroupsSchema(db)
-  migrateMapManualTracesSchema(db)
-  migrateMapManualTraceDataToDmx(db)
-  migrateDeviceTypeCustomSchema(db)
-  migrateEquipmentValuesMirrorColumn(db)
-  migrateEventLogsSchema(db)
-  migrateCanonicalizeNetworkIds(db)
-  seedDefaultSettings(db)
-  ensureSettingsKeys(db)
+  migrateDeviceGroupsSchema(database)
+  migrateDeviceInsightsSchema(database)
+  migrateArpMacChangeLog(database)
+  migrateNetworkIdSchema(database)
+  migrateNetworkProfilesSchema(database)
+  migrateAlertRulesSchema(database)
+  migrateAlertRulesEventLogSeverityColumn(database)
+  migrateMapLayoutSchema(database)
+  migrateMapManualGroupsSchema(database)
+  migrateMapManualTracesSchema(database)
+  migrateMapManualTraceDataToDmx(database)
+  migrateDeviceTypeCustomSchema(database)
+  migrateEquipmentValuesMirrorColumn(database)
+  migrateEventLogsSchema(database)
+  migrateCanonicalizeNetworkIds(database)
+  seedDefaultSettings(database)
+  ensureSettingsKeys(database)
 
-  const mirrorBackfilled = backfillMissingEquipmentValuesJsonMirrors(db)
+  const mirrorBackfilled = backfillMissingEquipmentValuesJsonMirrors(database)
   if (process.env.NODE_ENV === 'development' && mirrorBackfilled > 0) {
     console.info(`[db] backfilled equipment_values_json for ${mirrorBackfilled} device(s)`)
   }
 
-  return db
+  return database
 }
 
 /**

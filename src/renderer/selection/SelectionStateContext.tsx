@@ -41,6 +41,8 @@ export function SelectionStateProvider({ children }: { children: ReactNode }): J
   const sigOf = useCallback((ids: Iterable<string>) => [...ids].sort().join(','), [])
 
   useEffect(() => {
+    // Missing preload: let App render its own diagnostic instead of crashing the tree here.
+    if (!api) return
     let cancelled = false
     void api.getSelectedEquipmentIds().then((ids) => {
       if (cancelled) return
@@ -70,7 +72,7 @@ export function SelectionStateProvider({ children }: { children: ReactNode }): J
       // Push authoritative update to main (broadcasts to other windows).
       if (sig !== lastEmittedSigRef.current) {
         lastEmittedSigRef.current = sig
-        void api.setSelectedEquipmentIds([...next])
+        void api?.setSelectedEquipmentIds([...next])
       }
     },
     [api, sigOf]

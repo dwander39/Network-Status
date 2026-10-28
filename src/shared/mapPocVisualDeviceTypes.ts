@@ -56,3 +56,24 @@ export function mapPocVisualDeviceTypeDefaultDeviceType(t: MapPocVisualDeviceTyp
       return 'IoT'
   }
 }
+
+/**
+ * Highest `N` among persisted POC rows of this slug named `"<label> N"` (case-insensitive);
+ * 0 when none match. Seeds per-type auto-numbering for new POC creates.
+ */
+export function maxPocVisualDeviceNameSeq(
+  t: MapPocVisualDeviceType,
+  devices: ReadonlyArray<Pick<Device, 'name' | 'deviceTypeCustom'>>
+): number {
+  const escapedLabel = mapPocVisualDeviceTypeLabel(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`^${escapedLabel}\\s+(\\d+)$`, 'i')
+  let maxSeen = 0
+  for (const d of devices) {
+    if (d.deviceTypeCustom?.trim() !== t) continue
+    const m = re.exec(d.name.trim())
+    if (!m) continue
+    const n = Number(m[1])
+    if (Number.isFinite(n)) maxSeen = Math.max(maxSeen, n)
+  }
+  return maxSeen
+}

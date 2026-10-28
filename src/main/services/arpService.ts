@@ -26,6 +26,9 @@ import { applyDiscoveryUpdate } from './equipmentMutationService'
 
 const execFileAsync = promisify(execFile)
 
+/** Kill hung OS tools (e.g. a stalled ipconfig/netsh/arp) so polling falls back to its normal failure path. */
+const OS_COMMAND_TIMEOUT_MS = 15_000
+
 const SWEEP_CONCURRENCY = 24
 const SWEEP_PING_TIMEOUT_SEC = 1
 
@@ -105,10 +108,10 @@ export async function readOsArpTable(): Promise<OsArpRow[]> {
   let stdout: string
   try {
     if (platform === 'win32') {
-      const r = await execFileAsync('arp', ['-a'], { encoding: 'utf8', windowsHide: true })
+      const r = await execFileAsync('arp', ['-a'], { encoding: 'utf8', timeout: OS_COMMAND_TIMEOUT_MS, windowsHide: true })
       stdout = r.stdout
     } else {
-      const r = await execFileAsync('arp', ['-a'], { encoding: 'utf8' })
+      const r = await execFileAsync('arp', ['-a'], { encoding: 'utf8', timeout: OS_COMMAND_TIMEOUT_MS })
       stdout = r.stdout
     }
   } catch {

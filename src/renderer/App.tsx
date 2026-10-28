@@ -224,7 +224,7 @@ export function App(): JSX.Element {
       <div className="app">
         <h1>Could not start</h1>
         <p className="error">{loadError}</p>
-        <p className="muted">Open DevTools (F12) → Console for details. See TEST-TODO.md step 1.</p>
+        <p className="muted">Open DevTools (F12) → Console for details. See docs/MANUAL-UI-CHECKLIST.md step 1.</p>
       </div>
     )
   }

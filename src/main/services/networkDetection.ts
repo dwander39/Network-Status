@@ -15,6 +15,9 @@ import os from 'os'
 
 const execFileAsync = promisify(execFile)
 
+/** Kill hung OS tools (e.g. a stalled ipconfig/netsh/arp) so polling falls back to its normal failure path. */
+const OS_COMMAND_TIMEOUT_MS = 15_000
+
 export interface NetworkContext {
   /**
    * Wi‑Fi only when available. Not guaranteed:
@@ -106,7 +109,7 @@ function networkAddrAndCidr(ipv4: string, netmask: string): { cidr: string; netw
  * Windows: parse `ipconfig` (or `ipconfig /all`) for IPv4 + subnet + default gateway per adapter.
  * English locale labels; tolerates spacing. Picks a sensible default route when several exist.
  */
-function parseIpconfigWindows(stdout: string): { ipv4: string; netmask: string; gateway: string } | null {
+export function parseIpconfigWindows(stdout: string): { ipv4: string; netmask: string; gateway: string } | null {
   const lines = stdout.split(/\r?\n/)
   const candidates: { ipv4: string; netmask: string; gateway: string }[] = []
   let ipv4: string | null = null
@@ -178,7 +181,7 @@ function parseIpconfigWindows(stdout: string): { ipv4: string; netmask: string; 
 
 async function getDefaultRouteWindows(): Promise<{ ipv4: string; netmask: string; gateway: string } | null> {
   try {
-    const { stdout } = await execFileAsync('ipconfig', ['/all'], { encoding: 'utf8', windowsHide: true })
+    const { stdout } = await execFileAsync('ipconfig', ['/all'], { encoding: 'utf8', timeout: OS_COMMAND_TIMEOUT_MS, windowsHide: true })
     return parseIpconfigWindows(stdout)
   } catch {
     return null
@@ -190,7 +193,7 @@ async function getDefaultRouteWindows(): Promise<{ ipv4: string; netmask: string
  */
 async function getDefaultRouteDarwin(): Promise<{ gateway: string; iface: string } | null> {
   try {
-    const { stdout } = await execFileAsync('route', ['-n', 'get', 'default'], { encoding: 'utf8' })
+    const { stdout } = await execFileAsync('route', ['-n', 'get', 'default'], { encoding: 'utf8', timeout: OS_COMMAND_TIMEOUT_MS })
     let gateway: string | null = null
     let iface: string | null = null
     for (const line of stdout.split(/\r?\n/)) {
@@ -211,7 +214,7 @@ async function getDefaultRouteDarwin(): Promise<{ gateway: string; iface: string
  */
 async function getDefaultRouteLinux(): Promise<{ gateway: string; iface: string } | null> {
   try {
-    const { stdout } = await execFileAsync('ip', ['-4', 'route', 'show', 'default'], { encoding: 'utf8' })
+    const { stdout } = await execFileAsync('ip', ['-4', 'route', 'show', 'default'], { encoding: 'utf8', timeout: OS_COMMAND_TIMEOUT_MS })
     const m = stdout.trim().match(/\bdefault\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})\s+dev\s+(\S+)/)
     if (m) return { gateway: m[1], iface: m[2] }
   } catch {
@@ -239,6 +242,7 @@ async function getWifiSsidWindows(): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync('netsh', ['wlan', 'show', 'interfaces'], {
       encoding: 'utf8',
+      timeout: OS_COMMAND_TIMEOUT_MS,
       windowsHide: true
     })
     for (const line of stdout.split(/\r?\n/)) {
@@ -263,7 +267,7 @@ async function getWifiSsidDarwin(): Promise<string | null> {
   const airport =
     '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport'
   try {
-    const { stdout } = await execFileAsync(airport, ['-I'], { encoding: 'utf8' })
+    const { stdout } = await execFileAsync(airport, ['-I'], { encoding: 'utf8', timeout: OS_COMMAND_TIMEOUT_MS })
     for (const line of stdout.split(/\r?\n/)) {
       const m = line.match(/^\s*SSID:\s*(.+)\s*$/i)
       if (!m) continue
@@ -417,10 +421,19 @@ export function startNetworkWatch(options: {
   onContextSample?: (ctx: NetworkContext) => void
 }): NetworkWatchHandles {
   let stopped = false
+  let tickInFlight = false
   const tick = async (): Promise<void> => {
-    if (stopped) return
+    if (stopped || tickInFlight) return
+    tickInFlight = true
+    try {
+      await sample()
+    } finally {
+      tickInFlight = false
+    }
+  }
+  const sample = async (): Promise<void> => {
     const ctx = await computeNetworkContext()
-    if (!ctx) return
+    if (stopped || !ctx) return
     lastContext = ctx
     options.onContextSample?.(ctx)
 

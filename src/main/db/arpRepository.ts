@@ -181,19 +181,24 @@ export function upsertArpBatch(
       if (previousMac && previousMac !== mac) {
         // Reduce false positives by requiring the same change to be observed twice.
         upsertCandidate.run(ip, previousMac, mac, seenIso, seenIso)
-        const cand = getCandidate.get(ip) as
-          | { ip: string; old_mac_address: string; new_mac_address: string; seen_count: number }
-          | undefined
-        if (cand && cand.seen_count >= 2) {
-          insertMacChange.run(uuidv4(), ip, cand.old_mac_address, cand.new_mac_address, seenIso)
-          deleteCandidate.run(ip)
-          options.onMacChangeConfirmed?.({
-            ip,
-            oldMac: cand.old_mac_address,
-            newMac: cand.new_mac_address,
-            vendor: r.vendor
-          })
-        }
+      } else if (previousMac === mac) {
+        // `arp_entries` already took the new MAC on the first sighting, so a later scan reporting
+        // that same MAC is the second sighting of a pending change.
+        const pending = getCandidate.get(ip) as { old_mac_address: string; new_mac_address: string } | undefined
+        if (pending?.new_mac_address === mac) upsertCandidate.run(ip, pending.old_mac_address, mac, seenIso, seenIso)
+      }
+      const cand = getCandidate.get(ip) as
+        | { ip: string; old_mac_address: string; new_mac_address: string; seen_count: number }
+        | undefined
+      if (cand && cand.new_mac_address === mac && cand.seen_count >= 2) {
+        insertMacChange.run(uuidv4(), ip, cand.old_mac_address, cand.new_mac_address, seenIso)
+        deleteCandidate.run(ip)
+        options.onMacChangeConfirmed?.({
+          ip,
+          oldMac: cand.old_mac_address,
+          newMac: cand.new_mac_address,
+          vendor: r.vendor
+        })
       }
 
       options.onDiscoveryDeviceArpRow?.({
