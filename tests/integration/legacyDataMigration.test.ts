@@ -112,6 +112,23 @@ function hashDir(dir: string): Record<string, string> {
   return out
 }
 
+/**
+ * Legacy preservation contract (orchestrator-approved SQLite snapshot): the database file and any existing
+ * WAL stay byte-identical; the only allowed changes are SQLite-managed sidecars — the `-shm` index may be
+ * created or rewritten, and an empty `-wal` may be created where none existed.
+ */
+function expectLegacyPreserved(before: Record<string, string>): void {
+  const after = hashDir(legacyDir)
+  for (const [name, hash] of Object.entries(before)) {
+    if (name.endsWith('-shm')) continue
+    expect(after[name], `${name} must be unchanged`).toBe(hash)
+  }
+  for (const name of Object.keys(after).filter((n) => !(n in before))) {
+    expect(name === LEGACY_DATABASE_FILE_NAME + '-shm' || name === LEGACY_DATABASE_FILE_NAME + '-wal', name).toBe(true)
+    if (name.endsWith('-wal')) expect(statSync(join(legacyDir, name)).size, `${name} must be empty`).toBe(0)
+  }
+}
+
 function openCanonical(): Database.Database {
   return openDatabaseAtPath(canonicalDb)
 }
@@ -180,12 +197,48 @@ describe('prepareUserDataDirectory: legacy migration', () => {
     db.close()
   })
 
-  it('never modifies, adds or removes files in the legacy directory', () => {
+  // Contract changed with the orchestrator-approved SQLite snapshot: previously the whole legacy directory
+  // had to be byte-identical; now only SQLite's own `-shm` index may be added (see expectLegacyPreserved).
+  it('keeps the legacy database and its WAL byte-identical and un-checkpointed (only -shm may appear)', () => {
     createLegacyWithUncheckpointedWal()
     const before = hashDir(legacyDir)
     prepare()
-    expect(hashDir(legacyDir)).toEqual(before)
-    expect(readdirSync(legacyDir).sort()).toEqual([LEGACY_DATABASE_FILE_NAME, LEGACY_DATABASE_FILE_NAME + '-wal'])
+    expectLegacyPreserved(before)
+    expect(readdirSync(legacyDir).sort()).toEqual(
+      [LEGACY_DATABASE_FILE_NAME, LEGACY_DATABASE_FILE_NAME + '-shm', LEGACY_DATABASE_FILE_NAME + '-wal'].sort()
+    )
+    // The WAL was not folded into the main file: the main file alone still holds no devices.
+    const mainOnly = join(root, 'main-only-after.db')
+    copyFileSync(legacyDb, mainOnly)
+    const db = new Database(mainOnly)
+    expect((db.prepare('SELECT COUNT(*) AS n FROM devices').get() as { n: number }).n).toBe(0)
+    db.close()
+  })
+
+  it('applies schema upgrades only to the new copy, never to the legacy database', () => {
+    mkdirSync(legacyDir, { recursive: true })
+    const old = new Database(legacyDb)
+    old.exec(`
+      CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, ip TEXT NOT NULL UNIQUE,
+        subnet TEXT NOT NULL DEFAULT '', gateway TEXT NOT NULL DEFAULT '', mac_address TEXT,
+        last_status TEXT NOT NULL DEFAULT 'unknown', last_checked TEXT);
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO devices (id, name, ip) VALUES ('d1', 'Old', '192.168.1.1');
+    `)
+    old.close()
+    const before = hashDir(legacyDir)
+
+    expect(prepare().outcome).toBe('migrated')
+    expectLegacyPreserved(before)
+    const legacy = new Database(legacyDb, { readonly: true })
+    const legacyTables = legacy.prepare(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`).pluck().all()
+    const legacyDeviceCols = legacy.prepare(`SELECT name FROM pragma_table_info('devices')`).pluck().all()
+    legacy.close()
+    expect(legacyTables).toEqual(['devices', 'settings'])
+    expect(legacyDeviceCols).not.toContain('network_id')
+    const migrated = new Database(canonicalDb, { readonly: true })
+    expect(migrated.prepare(`SELECT name FROM pragma_table_info('devices')`).pluck().all()).toContain('network_id')
+    migrated.close()
   })
 
   it('writes a migration record whose row counts match the migrated database', () => {
@@ -284,7 +337,7 @@ describe('prepareUserDataDirectory: existing canonical data', () => {
     const err = expectFailure(() => prepare(), 'canonical-missing')
     expect(err.message).toContain(canonicalDb)
     expect(existsSync(canonicalDb)).toBe(false)
-    expect(hashDir(legacyDir)).toEqual(legacyBefore)
+    expectLegacyPreserved(legacyBefore)
   })
 })
 
@@ -316,7 +369,7 @@ describe('prepareUserDataDirectory: incomplete and failed migrations', () => {
     const err = expectFailure(() => prepare({ isLegacyInstanceRunning: () => true }), 'legacy-in-use')
     expect(err.message).toMatch(/Quit System Status/)
     expect(existsSync(canonicalDb)).toBe(false)
-    expect(hashDir(legacyDir)).toEqual(before)
+    expectLegacyPreserved(before)
   })
 
   it('aborts and cleans up when the legacy app starts during the copy', () => {
@@ -352,7 +405,7 @@ describe('prepareUserDataDirectory: incomplete and failed migrations', () => {
     const err = expectFailure(() => prepare(), 'legacy-unreadable')
     expect(err.message).toContain(legacyDb)
     expect(existsSync(canonicalDb)).toBe(false)
-    expect(hashDir(legacyDir)).toEqual(before)
+    expectLegacyPreserved(before)
   })
 
   it('rejects a corrupted legacy database', () => {
@@ -370,7 +423,7 @@ describe('prepareUserDataDirectory: incomplete and failed migrations', () => {
     expectFailure(() => prepare(), 'legacy-unreadable')
     expect(existsSync(canonicalDb)).toBe(false)
     expect(readdirSync(canonicalDir)).toEqual([])
-    expect(hashDir(legacyDir)).toEqual(before)
+    expectLegacyPreserved(before)
   })
 
   it('rejects an empty legacy file instead of migrating an empty database', () => {

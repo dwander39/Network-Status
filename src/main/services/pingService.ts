@@ -90,15 +90,21 @@ export interface PingRoundResult {
 /**
  * Ping all devices with bounded concurrency (efficient for 50+ hosts).
  * Persists last_status + last_checked and returns transitions for notifications.
+ * Once `isCancelled()` returns true (scheduler stopped), no further probes start and no result is
+ * persisted; cancelled entries report no transition. Probes already running are not killed.
  */
 export async function pingAllDevices(
   db: Database.Database,
-  devices: Device[]
+  devices: Device[],
+  isCancelled: () => boolean = () => false
 ): Promise<PingRoundResult[]> {
   const checkedIso = new Date().toISOString()
   const checkedMs = Date.parse(checkedIso)
   const outcomes = await runPool(devices, CONCURRENCY, async (d) => {
+    const unchanged = { id: d.id, name: d.name, ip: d.ip, offlineTransition: false, onlineTransition: false }
+    if (isCancelled()) return unchanged
     const alive = await probeHost(d.ip)
+    if (isCancelled()) return unchanged
     const current: DeviceStatus = alive ? 'online' : 'offline'
     const previous = d.lastStatus
     updateDeviceStatus(db, d.id, current, { source: 'monitoring', timestamp: checkedMs })

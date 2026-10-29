@@ -4,7 +4,8 @@ import {
   dismissDiscoveredIp,
   listArpEntries,
   listDiscoveredDevices,
-  upsertArpBatch
+  upsertArpBatch,
+  type MacChangeConfirmedEvent
 } from '../../src/main/db/arpRepository'
 import { applyUserSaveDevicePayload } from '../../src/main/services/equipmentMutationService'
 import { createTempDb, type TempDb } from './helpers/tempDb'
@@ -46,7 +47,7 @@ describe('upsertArpBatch', () => {
   })
 
   describe('MAC change confirmation', () => {
-    const scan = (mac: string, onMacChangeConfirmed: ReturnType<typeof vi.fn>): void =>
+    const scan = (mac: string, onMacChangeConfirmed: (ev: MacChangeConfirmedEvent) => void): void =>
       upsertArpBatch(t.db, [row('192.168.1.5', mac, 'Acme')], new Date().toISOString(), {
         snapshotPrune: false,
         networkId: NET_A,
@@ -88,6 +89,53 @@ describe('upsertArpBatch', () => {
       const cb = vi.fn()
       for (let i = 0; i < 4; i++) scan('aa:aa:aa:aa:aa:01', cb)
       expect(cb).not.toHaveBeenCalled()
+    })
+
+    it('does not report a change when an unconfirmed MAC returns to the original identity', () => {
+      const cb = vi.fn()
+      for (const mac of ['01', '02', '01', '01'].map((s) => `aa:aa:aa:aa:aa:${s}`)) scan(mac, cb)
+      expect(cb).not.toHaveBeenCalled()
+      expect(macChangeRows()).toBe(0)
+    })
+
+    it('keeps the confirmed MAC/vendor and skips the discovery hook until a change is confirmed', () => {
+      const onDiscoveryDeviceArpRow = vi.fn()
+      const scanWith = (mac: string, vendor: string): void =>
+        upsertArpBatch(t.db, [row('192.168.1.5', mac, vendor)], new Date().toISOString(), {
+          snapshotPrune: false,
+          networkId: NET_A,
+          onDiscoveryDeviceArpRow
+        })
+      scanWith('aa:aa:aa:aa:aa:01', 'Acme')
+      scanWith('aa:aa:aa:aa:aa:02', 'Other')
+      expect(listArpEntries(t.db, NET_A)[0]).toMatchObject({ macAddress: 'aa:aa:aa:aa:aa:01', vendor: 'Acme' })
+      expect(onDiscoveryDeviceArpRow).toHaveBeenCalledTimes(1)
+
+      scanWith('aa:aa:aa:aa:aa:02', 'Other')
+      expect(listArpEntries(t.db, NET_A)[0]).toMatchObject({ macAddress: 'aa:aa:aa:aa:aa:02', vendor: 'Other' })
+      expect(onDiscoveryDeviceArpRow).toHaveBeenLastCalledWith(
+        expect.objectContaining({ normalizedMac: 'aa:aa:aa:aa:aa:02' })
+      )
+    })
+
+    it('confirms against the confirmed baseline when the candidate MAC changes (A,B,C,C → A→C)', () => {
+      const cb = vi.fn()
+      for (const mac of ['01', '02', '03', '03'].map((s) => `aa:aa:aa:aa:aa:${s}`)) scan(mac, cb)
+      expect(cb).toHaveBeenCalledTimes(1)
+      expect(cb).toHaveBeenCalledWith(expect.objectContaining({ oldMac: 'aa:aa:aa:aa:aa:01', newMac: 'aa:aa:aa:aa:aa:03' }))
+      expect(macChangeRows()).toBe(1)
+    })
+
+    it('a stale candidate cannot confirm after the entry was pruned and reappears with a new baseline', () => {
+      const cb = vi.fn()
+      const opts = { snapshotPrune: true, networkId: NET_A, onMacChangeConfirmed: cb }
+      upsertArpBatch(t.db, [row('192.168.1.5', 'aa:aa:aa:aa:aa:01')], 't1', opts)
+      upsertArpBatch(t.db, [row('192.168.1.5', 'aa:aa:aa:aa:aa:02')], 't2', opts)
+      upsertArpBatch(t.db, [row('192.168.1.9', 'aa:aa:aa:aa:aa:09')], 't3', opts) // .5 pruned
+      upsertArpBatch(t.db, [row('192.168.1.5', 'aa:aa:aa:aa:aa:02')], 't4', opts) // new baseline, not a change
+      upsertArpBatch(t.db, [row('192.168.1.5', 'aa:aa:aa:aa:aa:02')], 't5', opts)
+      expect(cb).not.toHaveBeenCalled()
+      expect(macChangeRows()).toBe(0)
     })
   })
 

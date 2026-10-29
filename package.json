@@ -14,33 +14,35 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "node scripts/run-integration-tests.mjs",
     "verify": "npm run typecheck && npm test && npm run build:vite",
-    "postinstall": "electron-builder install-app-deps"
+    "smoke:isolated": "node scripts/smoke-isolated.mjs",
+    "setup": "npm ci --ignore-scripts && node node_modules/electron/install.js && npm rebuild esbuild"
   },
   "dependencies": {
     "@xyflow/react": "^12.10.2",
-    "better-sqlite3": "^11.7.0",
+    "better-sqlite3": "^13.0.3",
     "mac-oui-lookup": "^1.1.4",
     "ping": "^0.4.4",
-    "uuid": "^11.0.3"
+    "uuid": "^11.1.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/ping": "^0.4.4",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8",
-    "electron-vite": "^2.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.10.0",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^5.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.7.2",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.9"
+    "vite": "^7.3.7",
+    "vitest": "^4.1.12"
   },
   "build": {
     "appId": "com.systemstatus.app",
     "productName": "Network Status",
+    "npmRebuild": false,
     "directories": {
       "output": "release"
     },

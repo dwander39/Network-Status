@@ -34,6 +34,17 @@ export function getDatabase(): Database.Database {
  */
 export function openDatabaseAtPath(path: string): Database.Database {
   const database = new Database(path)
+  try {
+    initializeSchema(database)
+  } catch (e) {
+    // Never leak a half-initialized handle (it would keep the file locked on Windows).
+    database.close()
+    throw e
+  }
+  return database
+}
+
+function initializeSchema(database: Database.Database): void {
   database.pragma('journal_mode = WAL')
   database.pragma('foreign_keys = ON')
 
@@ -94,8 +105,6 @@ export function openDatabaseAtPath(path: string): Database.Database {
   if (process.env.NODE_ENV === 'development' && mirrorBackfilled > 0) {
     console.info(`[db] backfilled equipment_values_json for ${mirrorBackfilled} device(s)`)
   }
-
-  return database
 }
 
 /**

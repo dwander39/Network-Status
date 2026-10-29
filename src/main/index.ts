@@ -1,10 +1,24 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, type MenuItemConstructorOptions } from 'electron'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { writeFile } from 'fs/promises'
 import { getDatabase, closeDatabase, markUserDataPrepared } from './db/database'
 import { applyAppIdentity, DATABASE_FILE_NAME, LEGACY_DATABASE_FILE_NAME, PRODUCT_NAME } from './appIdentity'
 import { prepareUserDataDirectory } from './legacyDataMigration'
+import {
+  assertTrustedIpcSender,
+  hardenWebContents,
+  isTrustedRendererUrl,
+  resolveDevRendererUrl,
+  secureWebPreferences,
+  type TrustedRenderer
+} from './security'
+import {
+  parseContextMenuRequest,
+  parsePurgeDeviceCachePayload,
+  sanitizeSelectedIds,
+  sanitizeSettingsPatch
+} from './ipcValidation'
 import {
   debugResolveEquipmentRuntimeProjectionWithJsonHydration,
   listDevices,
@@ -34,7 +48,7 @@ import {
 import { scanArpCache } from './services/arpService'
 import { notifyNewUnknownDevices } from './services/notificationService'
 import { getSettings, saveSettings } from './db/settingsRepository'
-import { startScheduler, type SchedulerHandles } from './services/scheduler'
+import { createSchedulerController, type SchedulerController } from './services/scheduler'
 import { createTray, updateTrayTooltip } from './tray'
 import { listNetworkAdapters } from './services/networkAdapterService'
 import {
@@ -100,6 +114,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 // Name, AUMID and userData must be fixed before the single-instance lock and any userData consumer.
 const userDataLayout = applyAppIdentity(app)
 
+// Only the app's own renderer document is trusted (dev server only in an unpackaged run); every
+// WebContents gets navigation/new-window guards before it can load anything.
+const rendererIndexPath = join(__dirname, '../renderer/index.html')
+const preloadPath = join(__dirname, '../preload/index.js')
+const devServerUrl = resolveDevRendererUrl(process.env, app.isPackaged)
+const trustedRenderer: TrustedRenderer = devServerUrl
+  ? { kind: 'dev', origin: devServerUrl }
+  : { kind: 'file', indexPath: rendererIndexPath }
+const isTrustedRenderer = (url: string): boolean => isTrustedRendererUrl(url, trustedRenderer)
+app.on('web-contents-created', (_e, contents) => hardenWebContents(contents, isTrustedRenderer))
+
 // Fail fast with clear logging when a startup-time async error occurs (e.g. migration failure).
 process.on('unhandledRejection', (reason) => {
   console.error('[main] Unhandled promise rejection', reason)
@@ -113,7 +138,7 @@ process.on('unhandledRejection', (reason) => {
 
 let mainWindow: BrowserWindow | null = null
 let tray: ReturnType<typeof createTray> | null = null
-let scheduler: SchedulerHandles | null = null
+let scheduler: SchedulerController | null = null
 let networkWatch: ReturnType<typeof startNetworkWatch> | null = null
 let isQuitting = false
 let schedulerRestartTimer: NodeJS.Timeout | null = null
@@ -287,11 +312,7 @@ function buildMenu(): void {
 }
 
 function devRendererUrl(): string | undefined {
-  return (
-    process.env['ELECTRON_RENDERER_URL'] ||
-    process.env['VITE_DEV_SERVER_URL'] ||
-    undefined
-  )
+  return devServerUrl
 }
 
 function createWindow(): void {
@@ -299,16 +320,12 @@ function createWindow(): void {
     width: 1000,
     height: 680,
     show: false,
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
+    webPreferences: secureWebPreferences(preloadPath)
   })
 
   const url = devRendererUrl()
   if (url) void mainWindow.loadURL(url)
-  else mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  else mainWindow.loadFile(rendererIndexPath)
 
   mainWindow.once('ready-to-show', () => mainWindow?.show())
 
@@ -357,10 +374,17 @@ function pushDeviceGroupsToRenderer(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle(IPC.GET_SELECTED_EQUIPMENT_IDS, () => selectedEquipmentIds)
+  // Every handler rejects calls that do not come from the trusted renderer document.
+  const handle: typeof ipcMain.handle = (channel, listener) =>
+    ipcMain.handle(channel, (e, ...args) => {
+      assertTrustedIpcSender(e, isTrustedRenderer)
+      return listener(e, ...args)
+    })
 
-  ipcMain.handle(IPC.SET_SELECTED_EQUIPMENT_IDS, (_e, ids: unknown) => {
-    const next = Array.isArray(ids) ? ids.map((x) => String(x)) : []
+  handle(IPC.GET_SELECTED_EQUIPMENT_IDS, () => selectedEquipmentIds)
+
+  handle(IPC.SET_SELECTED_EQUIPMENT_IDS, (_e, ids: unknown) => {
+    const next = sanitizeSelectedIds(ids)
     // Keep stable ordering for simple equality checks in renderers.
     next.sort()
     const prev = selectedEquipmentIds
@@ -369,7 +393,7 @@ function registerIpc(): void {
     pushSelectedEquipmentIdsChanged()
   })
 
-  ipcMain.handle(IPC.OPEN_MAP_VIEW_WINDOW, async () => {
+  handle(IPC.OPEN_MAP_VIEW_WINDOW, async () => {
     if (mapWindow && mapWindow.isDestroyed()) {
       mapWindow = null
       isMapWindowOpen = false
@@ -387,10 +411,7 @@ function registerIpc(): void {
               y: bounds.y + 40
             }
           : {}),
-        webPreferences: {
-          preload: join(__dirname, '../preload/index.js'),
-          contextIsolation: true
-        }
+        webPreferences: secureWebPreferences(preloadPath)
       })
       mapWindow = w
       isMapWindowOpen = true
@@ -405,14 +426,14 @@ function registerIpc(): void {
 
       const url = devRendererUrl()
       if (url) await w.loadURL(`${url}#map-window`)
-      else await w.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'map-window' })
+      else await w.loadFile(rendererIndexPath, { hash: 'map-window' })
     } catch {
       mapWindow = null
       isMapWindowOpen = false
     }
   })
 
-  ipcMain.handle(IPC.FOCUS_MAP_VIEW_WINDOW_IF_OPEN, () => {
+  handle(IPC.FOCUS_MAP_VIEW_WINDOW_IF_OPEN, () => {
     if (mapWindow && mapWindow.isDestroyed()) {
       mapWindow = null
       isMapWindowOpen = false
@@ -427,7 +448,7 @@ function registerIpc(): void {
     return false
   })
 
-  ipcMain.handle(IPC.FOCUS_BROWSER_WINDOW_FOR_KEYBOARD, (event, context?: string) => {
+  handle(IPC.FOCUS_BROWSER_WINDOW_FOR_KEYBOARD, (event, context?: string) => {
     const senderWin = BrowserWindow.fromWebContents(event.sender)
     if (senderWin && !senderWin.isDestroyed()) {
       if (!senderWin.isVisible()) senderWin.show()
@@ -438,13 +459,13 @@ function registerIpc(): void {
     focusBrowserWindowForKeyboardFromMain(typeof context === 'string' ? context : 'unknown')
   })
 
-  ipcMain.handle(IPC.GET_NETWORK_INFO, () => networkInfoPayload())
+  handle(IPC.GET_NETWORK_INFO, () => networkInfoPayload())
 
-  ipcMain.handle(IPC.GET_NETWORK_PROFILES, () =>
+  handle(IPC.GET_NETWORK_PROFILES, () =>
     listNetworkProfiles(getDatabase(), uiNetworkId())
   )
 
-  ipcMain.handle(IPC.CREATE_NETWORK_PROFILE, (_e, payload: CreateNetworkProfilePayload) => {
+  handle(IPC.CREATE_NETWORK_PROFILE, (_e, payload: CreateNetworkProfilePayload) => {
     const db = getDatabase()
     const nid = normalizeNetworkId(payload.networkId)
     if (nid === EVENT_LOG_NETWORK_UNKNOWN) {
@@ -457,20 +478,20 @@ function registerIpc(): void {
     return p
   })
 
-  ipcMain.handle(IPC.IGNORE_NEW_NETWORK, (_e, networkId: string) => {
+  handle(IPC.IGNORE_NEW_NETWORK, (_e, networkId: string) => {
     const nid = normalizeNetworkId(networkId)
     if (nid === EVENT_LOG_NETWORK_UNKNOWN) return
     if (nid) ignoredNewNetworkIds.add(nid)
   })
 
-  ipcMain.handle(IPC.RENAME_NETWORK_PROFILE, (_e, payload: RenameNetworkProfilePayload) => {
+  handle(IPC.RENAME_NETWORK_PROFILE, (_e, payload: RenameNetworkProfilePayload) => {
     const p = renameNetworkProfile(getDatabase(), payload.id, payload.name)
     pushNetworkProfilesToRenderer()
     pushNetworkInfoUpdated()
     return p
   })
 
-  ipcMain.handle(IPC.DELETE_NETWORK_PROFILE, async (_e, id: string) => {
+  handle(IPC.DELETE_NETWORK_PROFILE, async (_e, id: string) => {
     const db = getDatabase()
     const list = listNetworkProfiles(db, uiNetworkId())
     const target = list.find((p) => p.id === id) ?? null
@@ -492,7 +513,7 @@ function registerIpc(): void {
     refreshTray()
   })
 
-  ipcMain.handle(IPC.GET_EVENT_LOGS, (_e, query?: GetEventLogsQuery) => {
+  handle(IPC.GET_EVENT_LOGS, (_e, query?: GetEventLogsQuery) => {
     try {
       return listEventLogs(getDatabase(), query ?? {})
     } catch (e) {
@@ -507,7 +528,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.CLEAR_EVENT_LOGS, (_e, payload: import('@shared/types').ClearEventLogsPayload) => {
+  handle(IPC.CLEAR_EVENT_LOGS, (_e, payload: import('@shared/types').ClearEventLogsPayload) => {
     try {
       const rowsDeleted = deleteEventLogs(getDatabase(), payload?.query ?? {})
       return { rowsDeleted }
@@ -523,7 +544,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.EXPORT_EVENT_LOGS, async (_e, payload: import('@shared/types').ExportEventLogsPayload) => {
+  handle(IPC.EXPORT_EVENT_LOGS, async (_e, payload: import('@shared/types').ExportEventLogsPayload) => {
     const db = getDatabase()
     try {
       const query = payload?.query ?? {}
@@ -659,21 +680,22 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.GET_ALERT_RULES, () => listAlertRules(getDatabase()))
+  handle(IPC.GET_ALERT_RULES, () => listAlertRules(getDatabase()))
 
-  ipcMain.handle(IPC.SAVE_ALERT_RULE, (_e, payload: SaveAlertRulePayload) => {
+  handle(IPC.SAVE_ALERT_RULE, (_e, payload: SaveAlertRulePayload) => {
     const r = saveAlertRule(getDatabase(), payload)
     pushAlertRulesToRenderer()
     return r
   })
 
-  ipcMain.handle(IPC.DELETE_ALERT_RULE, (_e, id: string) => {
+  handle(IPC.DELETE_ALERT_RULE, (_e, id: string) => {
     const ok = deleteAlertRule(getDatabase(), id)
     if (ok) pushAlertRulesToRenderer()
     return ok
   })
 
-  ipcMain.handle(IPC.PURGE_DEVICE_CACHE, async (_e, payload: PurgeDeviceCachePayload) => {
+  handle(IPC.PURGE_DEVICE_CACHE, async (_e, raw: unknown) => {
+    const payload: PurgeDeviceCachePayload = parsePurgeDeviceCachePayload(raw)
     const db = getDatabase()
     let devicesRemoved = 0
     let arpRemoved = 0
@@ -703,13 +725,13 @@ function registerIpc(): void {
     return { devicesRemoved, arpRemoved }
   })
 
-  ipcMain.handle(IPC.GET_MAP_LAYOUT, (_e, networkId: string) => {
+  handle(IPC.GET_MAP_LAYOUT, (_e, networkId: string) => {
     const nid = normalizeNetworkId(networkId)
     if (!nid) return { manualGroups: [], positions: {} }
     return getMapLayoutBundle(getDatabase(), nid)
   })
 
-  ipcMain.handle(IPC.SAVE_MAP_LAYOUT, (_e, payload: MapLayoutSavePayload) => {
+  handle(IPC.SAVE_MAP_LAYOUT, (_e, payload: MapLayoutSavePayload) => {
     const nid = normalizeNetworkId(payload.networkId)
     if (!nid) return
     const db = getDatabase()
@@ -720,7 +742,7 @@ function registerIpc(): void {
     pushMapLayoutInvalidated(nid)
   })
 
-  ipcMain.handle(IPC.UPSERT_MAP_MANUAL_TRACE, (_e, payload: SaveMapManualTracePayload) => {
+  handle(IPC.UPSERT_MAP_MANUAL_TRACE, (_e, payload: SaveMapManualTracePayload) => {
     const nid = normalizeNetworkId(payload.networkId)
     if (!nid) throw new Error('Invalid network')
     const src = String(payload.sourceDeviceId ?? '').trim()
@@ -742,13 +764,13 @@ function registerIpc(): void {
     return row
   })
 
-  ipcMain.handle(IPC.GET_MAP_MANUAL_TRACES, (_e, networkId: string) => {
+  handle(IPC.GET_MAP_MANUAL_TRACES, (_e, networkId: string) => {
     const nid = normalizeNetworkId(networkId)
     if (!nid) return [] as MapManualTrace[]
     return listManualTracesForNetwork(getDatabase(), nid)
   })
 
-  ipcMain.handle(IPC.CREATE_MAP_MANUAL_GROUP, (_e, payload: CreateMapManualGroupPayload) => {
+  handle(IPC.CREATE_MAP_MANUAL_GROUP, (_e, payload: CreateMapManualGroupPayload) => {
     const nid = normalizeNetworkId(payload.networkId)
     if (!nid) throw new Error('Invalid network')
     const row = createManualGroup(getDatabase(), { ...payload, networkId: nid })
@@ -756,21 +778,21 @@ function registerIpc(): void {
     return row
   })
 
-  ipcMain.handle(IPC.RENAME_MAP_MANUAL_GROUP, (_e, payload: RenameMapManualGroupPayload) => {
+  handle(IPC.RENAME_MAP_MANUAL_GROUP, (_e, payload: RenameMapManualGroupPayload) => {
     const db = getDatabase()
     const g = getManualGroup(db, payload.id)
     renameManualGroup(db, payload)
     if (g?.networkId) pushMapLayoutInvalidated(g.networkId)
   })
 
-  ipcMain.handle(IPC.DELETE_MAP_MANUAL_GROUP, (_e, id: string) => {
+  handle(IPC.DELETE_MAP_MANUAL_GROUP, (_e, id: string) => {
     const db = getDatabase()
     const g = getManualGroup(db, String(id))
     deleteManualGroup(db, String(id))
     if (g?.networkId) pushMapLayoutInvalidated(g.networkId)
   })
 
-  ipcMain.handle(IPC.SET_MAP_MANUAL_GROUP_LOCK, (_e, payload: SetMapManualGroupLockPayload) => {
+  handle(IPC.SET_MAP_MANUAL_GROUP_LOCK, (_e, payload: SetMapManualGroupLockPayload) => {
     setManualGroupContentsLocked(getDatabase(), { id: String(payload.id), locked: Boolean(payload.locked) })
     mainWindow?.webContents.send(IPC.ON_MAP_MANUAL_GROUP_LOCK_CHANGED, {
       id: String(payload.id),
@@ -778,7 +800,8 @@ function registerIpc(): void {
     })
   })
 
-  ipcMain.handle(IPC.SHOW_MAP_NODE_CONTEXT_MENU, (e, payload: ShowMapNodeContextMenuPayload) => {
+  handle(IPC.SHOW_MAP_NODE_CONTEXT_MENU, (e, raw: unknown) => {
+    const payload: ShowMapNodeContextMenuPayload = parseContextMenuRequest(raw)
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win.isDestroyed()) return
     const x = Math.round(payload.x)
@@ -844,14 +867,14 @@ function registerIpc(): void {
     menu.popup({ window: win, x, y })
   })
 
-  ipcMain.handle(IPC.RESET_MAP_LAYOUT, (_e, networkId: string) => {
+  handle(IPC.RESET_MAP_LAYOUT, (_e, networkId: string) => {
     const nid = normalizeNetworkId(networkId)
     if (!nid) return
     deleteMapLayoutForNetwork(getDatabase(), nid)
     pushMapLayoutInvalidated(nid)
   })
 
-  ipcMain.handle(IPC.GET_DEVICES, (_e, requestedNetworkId?: string | null) => {
+  handle(IPC.GET_DEVICES, (_e, requestedNetworkId?: string | null) => {
     const db = getDatabase()
     if (requestedNetworkId != null && String(requestedNetworkId).trim() !== '') {
       return listDevices(db, normalizeNetworkId(String(requestedNetworkId)))
@@ -859,18 +882,18 @@ function registerIpc(): void {
     return listDevices(db, uiNetworkId())
   })
 
-  ipcMain.handle(IPC.GET_NETWORK_ADAPTERS, () => listNetworkAdapters())
+  handle(IPC.GET_NETWORK_ADAPTERS, () => listNetworkAdapters())
 
-  ipcMain.handle(IPC.GET_DEVICE_GROUPS, () => listDeviceGroups(getDatabase()))
+  handle(IPC.GET_DEVICE_GROUPS, () => listDeviceGroups(getDatabase()))
 
-  ipcMain.handle(IPC.SAVE_DEVICE_GROUP, (_e, payload: SaveDeviceGroupPayload) => {
+  handle(IPC.SAVE_DEVICE_GROUP, (_e, payload: SaveDeviceGroupPayload) => {
     const g = saveDeviceGroup(getDatabase(), payload)
     pushDeviceGroupsToRenderer()
     mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, listDevices(getDatabase(), uiNetworkId()))
     return g
   })
 
-  ipcMain.handle(IPC.DELETE_DEVICE_GROUP, (_e, id: string) => {
+  handle(IPC.DELETE_DEVICE_GROUP, (_e, id: string) => {
     deleteDeviceGroup(getDatabase(), id)
     pushDeviceGroupsToRenderer()
     const payload = listDevices(getDatabase(), uiNetworkId())
@@ -878,7 +901,7 @@ function registerIpc(): void {
     mapWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, payload)
   })
 
-  ipcMain.handle(IPC.SET_DEVICE_GROUP, (_e, deviceId: string, groupId: string | null) => {
+  handle(IPC.SET_DEVICE_GROUP, (_e, deviceId: string, groupId: string | null) => {
     const d = applyUserSetDeviceGroup(getDatabase(), deviceId, groupId)
     const payload = listDevices(getDatabase(), uiNetworkId())
     mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, payload)
@@ -887,7 +910,7 @@ function registerIpc(): void {
     return d
   })
 
-  ipcMain.handle(IPC.SAVE_DEVICE, (_e, payload: SaveDevicePayload) => {
+  handle(IPC.SAVE_DEVICE, (_e, payload: SaveDevicePayload) => {
     const d = applyUserSaveDevicePayload(getDatabase(), payload)
     const next = listDevices(getDatabase(), uiNetworkId())
     mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, next)
@@ -897,7 +920,7 @@ function registerIpc(): void {
     return d
   })
 
-  ipcMain.handle(IPC.DELETE_DEVICE, async (_e, id: string) => {
+  handle(IPC.DELETE_DEVICE, async (_e, id: string) => {
     await deleteDevice(getDatabase(), id, { source: 'user' })
     const next = listDevices(getDatabase(), uiNetworkId())
     mainWindow?.webContents.send(IPC.ON_DEVICES_CHANGED, next)
@@ -907,37 +930,37 @@ function registerIpc(): void {
   })
 
   /** Debug/maintenance: read-only mirror check (DevTools `window.ssApi.debugVerifyEquipmentMirrorDevice(id)`). */
-  ipcMain.handle(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_DEVICE, (_e, deviceId: string) =>
+  handle(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_DEVICE, (_e, deviceId: string) =>
     verifyEquipmentValuesMirrorRow(getDatabase(), String(deviceId ?? ''))
   )
-  ipcMain.handle(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_SCAN, () =>
+  handle(IPC.DEBUG_MAINTENANCE_VERIFY_EQUIPMENT_MIRROR_SCAN, () =>
     verifyAllEquipmentValuesMirrorRows(getDatabase())
   )
 
   /** Debug/maintenance: JSON hydration experiment + fallback (DevTools `window.ssApi.debugResolveEquipmentRuntimeJsonHydration(id)`). */
-  ipcMain.handle(IPC.DEBUG_MAINTENANCE_RESOLVE_EQUIPMENT_RUNTIME_JSON_HYDRATION, (_e, deviceId: string) =>
+  handle(IPC.DEBUG_MAINTENANCE_RESOLVE_EQUIPMENT_RUNTIME_JSON_HYDRATION, (_e, deviceId: string) =>
     debugResolveEquipmentRuntimeProjectionWithJsonHydration(getDatabase(), String(deviceId ?? ''))
   )
 
-  ipcMain.handle(IPC.GET_ARP, () => ({
+  handle(IPC.GET_ARP, () => ({
     entries: listArpEntries(getDatabase(), uiNetworkId()),
     discovered: listDiscoveredDevices(getDatabase(), uiNetworkId())
   }))
 
-  ipcMain.handle(IPC.GET_DISCOVERED, () => listDiscoveredDevices(getDatabase(), uiNetworkId()))
+  handle(IPC.GET_DISCOVERED, () => listDiscoveredDevices(getDatabase(), uiNetworkId()))
 
-  ipcMain.handle(IPC.DISMISS_DISCOVERED_IP, (_e, ip: string) => {
+  handle(IPC.DISMISS_DISCOVERED_IP, (_e, ip: string) => {
     dismissDiscoveredIp(getDatabase(), ip)
     pushArpToRenderer()
   })
 
-  ipcMain.handle(IPC.CLEAR_DISMISSED_DISCOVERED, () => {
+  handle(IPC.CLEAR_DISMISSED_DISCOVERED, () => {
     clearDismissedDiscovered(getDatabase())
     pushArpToRenderer()
   })
 
   /** Manual ARP refresh: same work as scheduler’s ARP tick (scan + notify + push). */
-  ipcMain.handle(IPC.REFRESH_ARP, async () => {
+  handle(IPC.REFRESH_ARP, async () => {
     const db = getDatabase()
     await scanArpCache(db, eventLogs ?? undefined)
     const settings = getSettings(db)
@@ -965,18 +988,14 @@ function registerIpc(): void {
     return payload
   })
 
-  ipcMain.handle(IPC.GET_SETTINGS, () => getSettings(getDatabase()))
+  handle(IPC.GET_SETTINGS, () => getSettings(getDatabase()))
 
-  ipcMain.handle(IPC.SAVE_SETTINGS, (_e, partial: Partial<AppSettings>) => {
-    const next = saveSettings(getDatabase(), partial)
+  handle(IPC.SAVE_SETTINGS, (_e, raw: unknown) => {
+    const next = saveSettings(getDatabase(), sanitizeSettingsPatch(raw))
     eventLogs?.setEventSeverityOverrides(next.eventLogSeverityOverrides)
     if (schedulerRestartTimer) clearTimeout(schedulerRestartTimer)
     schedulerRestartTimer = setTimeout(() => {
-      scheduler?.stop()
-      scheduler = startScheduler(getDatabase(), mainWindow, {
-        onDevicesUpdated: refreshTray,
-        getSecondaryWindow: () => mapWindow
-      })
+      scheduler?.restart()
       schedulerRestartTimer = null
     }, 250)
     mainWindow?.webContents.send(IPC.ON_SETTINGS_CHANGED, next)
@@ -1016,6 +1035,9 @@ if (!gotLock) {
       return
     }
     markUserDataPrepared()
+    // The renderer needs no web permissions (notifications are shown by the main process).
+    session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false))
+    session.defaultSession.setPermissionCheckHandler(() => false)
     getDatabase()
     eventLogs = new EventLogService(getDatabase(), pushEventToRenderer)
     eventLogs.setEventSeverityOverrides(getSettings(getDatabase()).eventLogSeverityOverrides)
@@ -1030,11 +1052,12 @@ if (!gotLock) {
     createWindow()
     buildMenu()
     tray = createTray(mainWindow!, traySummary)
-    scheduler = startScheduler(getDatabase(), mainWindow, {
+    scheduler = createSchedulerController(getDatabase, () => mainWindow, {
       onDevicesUpdated: refreshTray,
       eventLogs: eventLogs ?? undefined,
       getSecondaryWindow: () => mapWindow
     })
+    scheduler.restart()
     networkWatch = startNetworkWatch({
       intervalMs: 12_000,
       onContextSample: (ctx) => {
@@ -1048,12 +1071,7 @@ if (!gotLock) {
         pushNetworkProfilesToRenderer()
         clearVendorLookupCache()
         resetAlertDiscoveryBaseline()
-        scheduler?.stop()
-        scheduler = startScheduler(getDatabase(), mainWindow, {
-          onDevicesUpdated: refreshTray,
-          eventLogs: eventLogs ?? undefined,
-          getSecondaryWindow: () => mapWindow
-        })
+        scheduler?.restart()
         const info = networkInfoPayload()
         if (!mainWindow || mainWindow.isDestroyed()) return
         if (info) mainWindow.webContents.send(IPC.ON_NETWORK_CHANGED, info)

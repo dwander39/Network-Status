@@ -52,18 +52,55 @@ export interface SchedulerHandles {
 }
 
 /**
+ * At most one ping round runs per process, across scheduler instances. `stop()` cannot abort probes
+ * that are already running, so a replacement scheduler (settings save, network change) skips its ticks
+ * until the stopped instance's round has settled; the stopped round persists and reports nothing more.
+ */
+let activePingRound: Promise<void> | null = null
+
+export interface SchedulerOptions {
+  onDevicesUpdated?: () => void
+  eventLogs?: EventLogService
+  /** Hardcoded secondary surface for the Map pop-out window (no generic multi-window system). */
+  getSecondaryWindow?: () => BrowserWindow | null
+}
+
+export interface SchedulerController {
+  /** Stop the current scheduler (if any) and start a new one with the bound options. */
+  restart: () => void
+  stop: () => void
+}
+
+/**
+ * Binds the scheduler options once so every restart path (startup, network change, settings save)
+ * starts an identically wired scheduler — in particular, the same event logger.
+ */
+export function createSchedulerController(
+  getDb: () => Database.Database,
+  getWindow: () => BrowserWindow | null,
+  options: SchedulerOptions
+): SchedulerController {
+  let handles: SchedulerHandles | null = null
+  return {
+    restart: () => {
+      handles?.stop()
+      handles = startScheduler(getDb(), getWindow(), options)
+    },
+    stop: () => {
+      handles?.stop()
+      handles = null
+    }
+  }
+}
+
+/**
  * Periodic ping + ARP scans; pushes DB updates to renderer via webContents.
  * Intervals restart when `startScheduler` is called again (e.g. after settings change).
  */
 export function startScheduler(
   db: Database.Database,
   win: BrowserWindow | null,
-  options?: {
-    onDevicesUpdated?: () => void
-    eventLogs?: EventLogService
-    /** Hardcoded secondary surface for the Map pop-out window (no generic multi-window system). */
-    getSecondaryWindow?: () => BrowserWindow | null
-  }
+  options?: SchedulerOptions
 ): SchedulerHandles {
   let pingTimer: ReturnType<typeof setInterval> | null = null
   let arpTimer: ReturnType<typeof setInterval> | null = null
@@ -94,12 +131,19 @@ export function startScheduler(
   }
 
   // A ping round can outlast the interval (e.g. many offline hosts at the 4s probe timeout);
-  // skip ticks while one is running so rounds never stack up.
-  let pingInFlight = false
-
+  // skip ticks while one is running (in this or a stopped instance) so rounds never stack up.
   const runPing = async (): Promise<void> => {
-    if (stopped || pingInFlight) return
-    pingInFlight = true
+    if (stopped || activePingRound) return
+    const round = pingRound()
+    activePingRound = round
+    try {
+      await round
+    } finally {
+      if (activePingRound === round) activePingRound = null
+    }
+  }
+
+  const pingRound = async (): Promise<void> => {
     try {
       const settings = getSettings(db)
       if (settings.listenAdapterNames.length === 0) {
@@ -118,7 +162,8 @@ export function startScheduler(
       const nid = getLastNetworkContext()?.networkId ?? getStableNetworkId()
       const devices = filterDevicesBySelectedAdapters(listDevices(db, nid), settings.listenAdapterNames)
       if (!devices.length) return
-      const results = await pingAllDevices(db, devices)
+      const results = await pingAllDevices(db, devices, () => stopped)
+      if (stopped) return
       for (const r of results) notifyDeviceOffline(settings, r)
       for (const r of results) {
         if (r.offlineTransition) {
@@ -155,6 +200,7 @@ export function startScheduler(
       pushDevices()
       options?.onDevicesUpdated?.()
     } catch (e) {
+      if (stopped) return
       options?.eventLogs?.logSystemErrorThrottled({
         key: 'scheduler.runPing',
         module: 'scheduler',
@@ -162,8 +208,6 @@ export function startScheduler(
         error: e,
         networkId: getLastNetworkContext()?.networkId ?? getStableNetworkId() ?? null
       })
-    } finally {
-      pingInFlight = false
     }
   }
 
@@ -172,6 +216,7 @@ export function startScheduler(
     try {
       const settings = getSettings(db)
       await scanArpCache(db, options?.eventLogs)
+      if (stopped) return
       const nid = getLastNetworkContext()?.networkId ?? getStableNetworkId()
       const discovered = listDiscoveredDevices(db, nid)
       notifyNewUnknownDevices(
@@ -181,6 +226,7 @@ export function startScheduler(
       onDiscoveryScanComplete(db, discovered, nid, options?.eventLogs)
       pushArp()
     } catch (e) {
+      if (stopped) return
       options?.eventLogs?.logSystemErrorThrottled({
         key: 'scheduler.runArp',
         module: 'scheduler',

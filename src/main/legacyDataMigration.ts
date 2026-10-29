@@ -1,44 +1,57 @@
 import Database from 'better-sqlite3'
 import {
   closeSync,
-  copyFileSync,
   existsSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readlinkSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync
 } from 'fs'
 import { hostname } from 'os'
-import { basename, join } from 'path'
+import { dirname, join } from 'path'
+import { openDatabaseAtPath } from './db/database'
 
 /**
  * One-time copy of pre-rename ("System Status") data into the canonical ("Network Status")
  * user-data directory. Electron-free so it can be tested against real SQLite files in temp dirs.
  * See docs/ARCHITECTURE.md → "Product identity and legacy data migration" for the design.
  *
- * Invariants: legacy files are only ever read; an existing canonical database is never replaced;
- * only a fully validated file is ever given the canonical database name.
+ * Invariants: the legacy database is only ever read, through a read-only SQLite connection (SQLite
+ * may create/update its `-shm` index and create an empty `-wal`; the database and existing WAL content
+ * are never written, checkpointed or truncated); schema upgrades run only on the new copy; an existing
+ * canonical database is never replaced; only a fully validated file gets the canonical database name.
  */
 
 export const MIGRATION_RECORD_FILE_NAME = 'legacy-migration.json'
 export const MIGRATION_STAGING_DIR_NAME = '.legacy-migration'
 export const MIGRATION_TEMP_SUFFIX = '.migrating'
 
-/** SQLite side files copied with the database. `-shm` is deliberately excluded (rebuilt from the WAL). */
-const SQLITE_COPIED_SUFFIXES = ['', '-wal', '-journal'] as const
+/** How long the read-only source connection waits for a lock before reporting the source as in use. */
+const SOURCE_BUSY_TIMEOUT_MS = 2000
+
+/**
+ * Columns every System Status database has had since its first schema (they are created by the base
+ * `CREATE TABLE` in `openDatabaseAtPath` and never added by a later migration). A source lacking them
+ * is not a System Status database the inline migrations can upgrade, even if a table name matches.
+ */
+const REQUIRED_LEGACY_COLUMNS: Record<string, readonly string[]> = {
+  devices: ['id', 'name', 'ip', 'subnet', 'gateway', 'mac_address', 'last_status', 'last_checked'],
+  settings: ['key', 'value']
+}
 
 export type LegacyMigrationFailureReason =
   | 'legacy-in-use'
-  | 'legacy-changed-during-copy'
+  | 'legacy-changed-during-snapshot'
   | 'legacy-unreadable'
   | 'legacy-invalid'
   | 'validation-failed'
   | 'canonical-missing'
+  | 'install-unsupported'
   | 'io'
 
 export class LegacyDataMigrationError extends Error {
@@ -72,6 +85,8 @@ export interface PrepareUserDataOptions {
   legacyDatabaseFileName: string
   /** Defaults to probing the legacy Chromium single-instance lock. */
   isLegacyInstanceRunning?: (legacyDir: string) => boolean
+  /** Non-overwriting install primitive; defaults to `fs.linkSync`. Replaceable only to simulate filesystems in tests. */
+  installLink?: (existingPath: string, newPath: string) => void
   now?: () => Date
 }
 
@@ -120,38 +135,19 @@ function migrateLegacyDatabase(
     )
   if (isRunning(opts.legacyDir)) throw inUseError()
 
-  const stagingDir = join(opts.canonicalDir, MIGRATION_STAGING_DIR_NAME)
   const tempDb = canonicalDb + MIGRATION_TEMP_SUFFIX
   try {
     mkdirSync(opts.canonicalDir, { recursive: true })
     removeMigrationArtifacts(opts.canonicalDir, canonicalDb)
-    mkdirSync(stagingDir, { recursive: true })
 
-    const stagedDb = join(stagingDir, basename(legacyDb))
-    const before = snapshotSqliteFiles(legacyDb)
-    for (const suffix of Object.keys(before)) copyFileSync(legacyDb + suffix, stagedDb + suffix)
-    if (!sameSnapshot(before, snapshotSqliteFiles(legacyDb))) {
-      throw new LegacyDataMigrationError(
-        'legacy-changed-during-copy',
-        `System Status data changed while it was being copied, so the copy was discarded.\n\n` +
-          `Quit System Status (including its tray icon) and start Network Status again.\n` +
-          `Data folder: ${opts.legacyDir}`
-      )
-    }
+    // Order: consistent snapshot → snapshot integrity → schema compatibility → upgrade the copy only
+    // → validate → non-overwriting install → record. The legacy database is only ever read.
+    const sourceCounts = snapshotLegacyDatabase(legacyDb, tempDb, opts.legacyDir)
     if (isRunning(opts.legacyDir)) throw inUseError()
-
-    const sourceCounts = snapshotStagedDatabase(stagedDb, tempDb, legacyDb)
-    validateMigratedDatabase(tempDb, sourceCounts)
+    validateSnapshot(tempDb, sourceCounts, legacyDb)
+    upgradeAndVerifySchema(tempDb, legacyDb)
     fsyncFile(tempDb)
-
-    // Single-instance lock guarantees no other Network Status process; re-check anyway, never overwrite.
-    if (existsSync(canonicalDb)) {
-      throw new LegacyDataMigrationError(
-        'io',
-        `A Network Status database appeared while migrating; it was left untouched:\n${canonicalDb}`
-      )
-    }
-    renameSync(tempDb, canonicalDb)
+    installWithoutOverwrite(tempDb, canonicalDb, opts.installLink ?? linkSync)
 
     const record: LegacyMigrationRecord = {
       migratedAt: (opts.now?.() ?? new Date()).toISOString(),
@@ -161,14 +157,17 @@ function migrateLegacyDatabase(
       tableRowCounts: sourceCounts
     }
     writeFileAtomic(recordPath, JSON.stringify(record, null, 2) + '\n')
-    rmSync(stagingDir, { recursive: true, force: true })
     return { outcome: 'migrated', record }
   } catch (e) {
     // Only our own artifacts are cleaned up; the legacy directory and any canonical DB are never touched.
-    try {
-      removeMigrationArtifacts(opts.canonicalDir, canonicalDb)
-    } catch {
-      /* keep the original error */
+    // A validated copy that could not be installed is kept for inspection (removed on the next start).
+    const keepValidatedCopy = e instanceof LegacyDataMigrationError && e.reason === 'install-unsupported'
+    if (!keepValidatedCopy) {
+      try {
+        removeMigrationArtifacts(opts.canonicalDir, canonicalDb)
+      } catch {
+        /* keep the original error */
+      }
     }
     if (e instanceof LegacyDataMigrationError) throw e
     throw new LegacyDataMigrationError(
@@ -180,39 +179,79 @@ function migrateLegacyDatabase(
   }
 }
 
-/** Opens the staged copy (replaying its WAL), validates it, and writes a consistent snapshot to `tempDb`. */
-function snapshotStagedDatabase(stagedDb: string, tempDb: string, legacyDb: string): Record<string, number> {
-  let staged: Database.Database
+/**
+ * Transaction-consistent snapshot of the live legacy database via SQLite itself.
+ *
+ * - The source is opened READ-ONLY, so this connection can never write a page, checkpoint, truncate or
+ *   delete the WAL (a read-write connection would checkpoint and delete the WAL when it closes last).
+ *   SQLite may still create or rewrite the `-shm` index, and creates an empty `-wal` if none exists.
+ * - `VACUUM INTO` runs in ONE read transaction; with WAL snapshot isolation the output is exactly one
+ *   committed database state (all tables, all committed WAL frames, no uncommitted frames), including
+ *   unknown tables and `user_version`.
+ * - `PRAGMA data_version` before and after detects a commit by any other connection while the counts and
+ *   snapshot were taken: that writer is live and its later commits would be lost, so the migration aborts.
+ */
+function snapshotLegacyDatabase(legacyDb: string, tempDb: string, legacyDir: string): Record<string, number> {
+  let source: Database.Database
   try {
-    staged = new Database(stagedDb, { fileMustExist: true })
+    source = new Database(legacyDb, { readonly: true, fileMustExist: true, timeout: SOURCE_BUSY_TIMEOUT_MS })
   } catch (e) {
-    throw unreadable(legacyDb, e)
+    throw sourceAccessError(legacyDb, legacyDir, e)
   }
   try {
-    let integrity: unknown
-    try {
-      integrity = staged.pragma('integrity_check', { simple: true })
-    } catch (e) {
-      throw unreadable(legacyDb, e)
-    }
+    const versionBefore = source.pragma('data_version', { simple: true })
+    const integrity = source.pragma('integrity_check', { simple: true })
     if (integrity !== 'ok') throw unreadable(legacyDb, `integrity check reported: ${String(integrity)}`)
-
-    const counts = tableRowCounts(staged)
-    if (!('devices' in counts)) {
+    const counts = tableRowCounts(source)
+    source.prepare('VACUUM INTO ?').run(tempDb)
+    if (source.pragma('data_version', { simple: true }) !== versionBefore) {
       throw new LegacyDataMigrationError(
-        'legacy-invalid',
-        `The System Status data file does not contain System Status data (no devices table), so it was not imported:\n` +
-          `${legacyDb}\n\nThe file was not changed.`
+        'legacy-changed-during-snapshot',
+        `Another program changed the System Status data while it was being copied, so the copy was discarded.\n\n` +
+          `Quit System Status (including its tray icon) and start Network Status again.\n` +
+          `Data folder: ${legacyDir}`
       )
     }
-    staged.prepare('VACUUM INTO ?').run(tempDb)
     return counts
+  } catch (e) {
+    throw e instanceof LegacyDataMigrationError ? e : sourceAccessError(legacyDb, legacyDir, e)
   } finally {
-    staged.close()
+    source.close()
   }
 }
 
-function validateMigratedDatabase(tempDb: string, expected: Record<string, number>): void {
+/** Maps SQLite failures on the read-only source connection to actionable, non-destructive errors. */
+function sourceAccessError(legacyDb: string, legacyDir: string, e: unknown): LegacyDataMigrationError {
+  const code = String((e as { code?: unknown }).code ?? '')
+  if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED') {
+    return new LegacyDataMigrationError(
+      'legacy-in-use',
+      `The System Status data is locked by another program, so it cannot be copied safely.\n\n` +
+        `Quit System Status (including its tray icon) and start Network Status again.\n` +
+        `Data folder: ${legacyDir}`,
+      e
+    )
+  }
+  if (code.startsWith('SQLITE_READONLY')) {
+    // e.g. a hot rollback journal or WAL recovery that needs write access: never done on the legacy file.
+    return new LegacyDataMigrationError(
+      'legacy-unreadable',
+      `The System Status data needs recovery that Network Status will not perform on the original file:\n` +
+        `${legacyDb}\n\nReason: ${errorMessage(e)}\nStart System Status once and quit it normally, then ` +
+        `start Network Status again. The file was not changed.`,
+      e
+    )
+  }
+  if (code.startsWith('SQLITE_')) return unreadable(legacyDb, e)
+  return new LegacyDataMigrationError(
+    'io',
+    `Copying System Status data to Network Status failed: ${errorMessage(e)}\n\nThe original data was not changed: ${legacyDir}`,
+    e
+  )
+}
+
+/** Integrity, row counts against the source snapshot, and the schema compatibility policy — all on the copy. */
+function validateSnapshot(tempDb: string, expected: Record<string, number>, legacyDb: string): void {
   const out = new Database(tempDb, { readonly: true, fileMustExist: true })
   try {
     const integrity = out.pragma('integrity_check', { simple: true })
@@ -228,8 +267,144 @@ function validateMigratedDatabase(tempDb: string, expected: Record<string, numbe
           `Integrity: ${String(integrity)}. The original data was not changed.`
       )
     }
+    assertLegacySchemaCompatible(out, legacyDb)
   } finally {
     out.close()
+  }
+}
+
+/**
+ * Compatibility policy (no schema version table exists; every schema change is an idempotent inline
+ * migration in `openDatabaseAtPath`):
+ * - `PRAGMA user_version` must be 0 — the app never sets it, so anything else was written by a
+ *   different or future schema owner the app cannot interpret.
+ * - The core tables/columns present since the first schema must exist (`REQUIRED_LEGACY_COLUMNS`).
+ * Older schemas missing later tables/columns are accepted; `upgradeAndVerifySchema` proves the real
+ * migration path brings them to the current schema.
+ */
+function assertLegacySchemaCompatible(db: Database.Database, legacyDb: string): void {
+  const userVersion = db.pragma('user_version', { simple: true })
+  if (userVersion !== 0) {
+    throw incompatible(legacyDb, `unsupported schema version ${String(userVersion)}`)
+  }
+  const columns = tableColumns(db)
+  for (const [table, required] of Object.entries(REQUIRED_LEGACY_COLUMNS)) {
+    const have = columns[table]
+    if (!have) throw incompatible(legacyDb, `missing table "${table}"`)
+    const missing = required.filter((c) => !have.includes(c))
+    if (missing.length) throw incompatible(legacyDb, `table "${table}" is missing column(s) ${missing.join(', ')}`)
+  }
+}
+
+/**
+ * Runs the application's own schema migrations on the temp copy and checks the result contains every
+ * table and column of a freshly created database. Installs nothing if the upgrade fails.
+ */
+function upgradeAndVerifySchema(tempDb: string, legacyDb: string): void {
+  let db: Database.Database
+  try {
+    db = openDatabaseAtPath(tempDb)
+  } catch (e) {
+    throw incompatible(legacyDb, `the schema upgrade failed: ${errorMessage(e)}`)
+  }
+  try {
+    const actual = tableColumns(db)
+    const missing: string[] = []
+    for (const [table, cols] of Object.entries(referenceSchema())) {
+      for (const c of cols) if (!actual[table]?.includes(c)) missing.push(`${table}.${c}`)
+    }
+    if (missing.length) throw incompatible(legacyDb, `after upgrade the schema still lacks ${missing.join(', ')}`)
+    const integrity = db.pragma('integrity_check', { simple: true })
+    if (integrity !== 'ok') {
+      throw new LegacyDataMigrationError(
+        'validation-failed',
+        `The upgraded Network Status database failed its integrity check (${String(integrity)}), so it was discarded.\n` +
+          `The original data was not changed.`
+      )
+    }
+  } finally {
+    db.close()
+  }
+}
+
+let cachedReferenceSchema: Record<string, string[]> | null = null
+
+/** Current schema, derived from the same code that creates it, so it cannot drift. */
+function referenceSchema(): Record<string, string[]> {
+  if (!cachedReferenceSchema) {
+    const ref = openDatabaseAtPath(':memory:')
+    try {
+      cachedReferenceSchema = tableColumns(ref)
+    } finally {
+      ref.close()
+    }
+  }
+  return cachedReferenceSchema
+}
+
+function tableColumns(db: Database.Database): Record<string, string[]> {
+  const tables = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+    .all() as { name: string }[]
+  const out: Record<string, string[]> = {}
+  for (const { name } of tables) {
+    out[name] = (db.prepare(`SELECT name FROM pragma_table_info(?)`).all(name) as { name: string }[]).map((r) => r.name)
+  }
+  return out
+}
+
+function incompatible(legacyDb: string, detail: string): LegacyDataMigrationError {
+  return new LegacyDataMigrationError(
+    'legacy-invalid',
+    `The System Status data file is not a database this version of Network Status can import (${detail}), ` +
+      `so it was not imported:\n${legacyDb}\n\nThe file was not changed.`
+  )
+}
+
+/**
+ * Gives the validated temp file the canonical name without ever replacing an existing file. A hard link
+ * is created atomically and fails with EEXIST if the name exists (temp and target share a directory, so
+ * the same filesystem). There is deliberately no rename fallback: Node's rename replaces an existing
+ * target. If the filesystem cannot hard-link, the migration stops and keeps the validated copy.
+ */
+function installWithoutOverwrite(
+  tempDb: string,
+  canonicalDb: string,
+  link: (existingPath: string, newPath: string) => void
+): void {
+  try {
+    link(tempDb, canonicalDb)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new LegacyDataMigrationError(
+        'io',
+        `A Network Status database appeared while migrating; it was left untouched:\n${canonicalDb}`,
+        e
+      )
+    }
+    throw new LegacyDataMigrationError(
+      'install-unsupported',
+      `The migrated data could not be installed without risking overwriting other data ` +
+        `(${errorMessage(e)}). The data folder's drive may not support hard links (e.g. FAT32/exFAT).\n\n` +
+        `The validated copy was kept at:\n${tempDb}\nThe original System Status data was not changed. ` +
+        `Move the Network Status data folder to an NTFS drive, or contact support.`,
+      e
+    )
+  }
+  rmSync(tempDb)
+  fsyncDirectory(dirname(canonicalDb))
+}
+
+/** Best-effort durability of the new directory entry; directories cannot be opened for fsync on Windows. */
+function fsyncDirectory(dir: string): void {
+  let fd: number | undefined
+  try {
+    fd = openSync(dir, 'r')
+    fsyncSync(fd)
+  } catch {
+    /* unsupported on this platform */
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }
 
@@ -245,28 +420,10 @@ function tableRowCounts(db: Database.Database): Record<string, number> {
   return counts
 }
 
-type FileSnapshot = Record<string, { size: number; mtimeMs: number }>
-
-function snapshotSqliteFiles(dbPath: string): FileSnapshot {
-  const snap: FileSnapshot = {}
-  for (const suffix of SQLITE_COPIED_SUFFIXES) {
-    try {
-      const st = statSync(dbPath + suffix)
-      snap[suffix] = { size: st.size, mtimeMs: st.mtimeMs }
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
-    }
-  }
-  return snap
-}
-
-function sameSnapshot(a: FileSnapshot, b: FileSnapshot): boolean {
-  const keys = Object.keys(a)
-  if (keys.length !== Object.keys(b).length) return false
-  return keys.every((k) => b[k] && a[k].size === b[k].size && a[k].mtimeMs === b[k].mtimeMs)
-}
-
-/** Removes only files this module creates (staging dir, temp DB, temp record) — never the canonical DB. */
+/**
+ * Removes only files this module creates (temp DB and its sidecars, temp record, and the staging dir
+ * used by earlier builds) — never the canonical DB.
+ */
 function removeMigrationArtifacts(canonicalDir: string, canonicalDb: string): void {
   rmSync(join(canonicalDir, MIGRATION_STAGING_DIR_NAME), { recursive: true, force: true })
   for (const suffix of ['', '-wal', '-shm', '-journal']) {

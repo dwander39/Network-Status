@@ -1,0 +1,5 @@
+# Whitespace rule for `git diff --check` only. There are deliberately no `text` / `eol` attributes:
+# line endings are not normalized here (docs/WORKFLOW.md, Repository conventions; CURRENT-STATE D12).
+# Many tracked files are stored with CRLF. `cr-at-eol` treats a CR before LF as part of the line
+# ending; trailing whitespace, space-before-tab and new blank lines at EOF are still reported.
+* whitespace=cr-at-eol

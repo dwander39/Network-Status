@@ -1,5 +1,5 @@
 /**
- * Minimal stand-in for the `electron` module in integration tests (aliased in vitest.workspace.ts).
+ * Minimal stand-in for the `electron` module in integration tests (aliased in vitest.config.ts).
  * Tests never touch the real userData directory: `app.getPath` throws so any accidental use is loud.
  */
 export const app = {

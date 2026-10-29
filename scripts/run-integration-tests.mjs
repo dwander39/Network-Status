@@ -1,5 +1,5 @@
 // Runs the Vitest "integration" project under Electron's bundled Node (ELECTRON_RUN_AS_NODE), so the
-// better-sqlite3 binary rebuilt for Electron by `postinstall` loads without a second native build.
+// shipped runtime (Electron 44 / Node 24) runs the SQLite tests; better-sqlite3 13 uses an N-API prebuild.
 // Extra CLI args are forwarded to Vitest (e.g. `npm run test:integration -- tests/integration/database.test.ts`).
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
